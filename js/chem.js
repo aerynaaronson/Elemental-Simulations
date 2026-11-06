@@ -476,12 +476,12 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     var o = S.rf() * 4 | 0;
     for (var k = 0; k < 6; k++) {
       var j = i + (k === 0 ? dirs[4] : dirs[(k + o) % 6]);
-      if (ID[j] === AIR) { ID[j] = id; PH[j] = S.phaseFor(id, t, P_POWDER); T[j] = t; PR[j] = 0; AUX[j] = 0; USED[j] = used; S.wakeI(j); return true; }
+      if (ID[j] === AIR) { ID[j] = id; PH[j] = S.phaseFor(id, t, P_POWDER); T[j] = t; PR[j] = 0; AUX[j] = 0; AUX2[j] = 0; U2[j] = 0; USED[j] = used; S.wakeI(j); return true; }
     }
     // A packed mixture has no room right beside it, so look one cell further out.
     for (var f = 0; f < FAR.length; f++) {
       var far = i + FAR[f][0] + FAR[f][1] * W + FAR[f][2] * WD;
-      if (far > 0 && far < ID.length && ID[far] === AIR) { ID[far] = id; PH[far] = S.phaseFor(id, t, P_POWDER); T[far] = t; PR[far] = 0; AUX[far] = 0; USED[far] = used; S.wakeI(far); return true; }
+      if (far > 0 && far < ID.length && ID[far] === AIR) { ID[far] = id; PH[far] = S.phaseFor(id, t, P_POWDER); T[far] = t; PR[far] = 0; AUX[far] = 0; AUX2[far] = 0; U2[far] = 0; USED[far] = used; S.wakeI(far); return true; }
     }
     // No free neighbour: a soluble product joins nearby water, and anything else can take a liquid cell's place, as a gas bubbles up through water.
     var m = Mat.list[id];
@@ -519,6 +519,20 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     }
   }
 
+  // A solute whose water has been used up moves into water beside it if that has room, and otherwise comes out as a grain. Only if neither can happen is it lost, and then it is counted.
+  function leaveBehind(c, id, share, t) {
+    if (share < 1e-5) return;
+    for (var q = 0; q < 6; q++) {
+      var n = c + dirs[q];
+      if (ID[n] !== H2O || PH[n] !== P_LIQUID) continue;
+      if (AUX[n] === id && USED[n] >= share) { USED[n] -= share; return; }
+      if (AUX2[n] === id && U2[n] >= share) { U2[n] -= share; return; }
+      if (!AUX[n] && AUX2[n] !== id) { AUX[n] = id; USED[n] = 1 - share; S.wakeI(n); return; }
+      if (AUX[n] !== id && !AUX2[n]) { AUX2[n] = id; U2[n] = 1 - share; S.wakeI(n); return; }
+    }
+    if (!emit(c, id, t, share)) S.noteLost(share * Mat.n0[id] * Mat.list[id].M);
+  }
+
   // One reaction event in true amounts. A cell holds (1 - USED) of its full share of moles, set by the substance's density and formula mass.
   // The limiting cell is used up and the other keeps what is left. Products get the moles the equation says, which is why mass balances.
   function applyRule(i, j, x, y, z, r, t, solI, solJ, sa, sb) {
@@ -528,7 +542,8 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     var condensed = PH[i] <= P_LIQUID || (!air && PH[j] <= P_LIQUID);
     if (solI || solJ) tNew = Math.min(tNew, Math.max(avg + r.heat * 0.2, 340));   // water soaks up most of the heat
     var idA = sa || ID[i], idB = sb || ID[j], n0 = Mat.n0;
-    var nA = r.nA || 1, nB = r.nB || 1, molI = (1 - USED[i]) * n0[idA], molJ = air ? 1e9 : (1 - USED[j]) * n0[idB];
+    // In a water cell USED says how strong its solute is. When the water itself reacts, the whole cell's worth is there.
+    var nA = r.nA || 1, nB = r.nB || 1, molI = (idA === H2O && !solI ? 1 : 1 - USED[i]) * n0[idA], molJ = air ? 1e9 : (idB === H2O && !solJ ? 1 : 1 - USED[j]) * n0[idB];
     var e = molI / nA < molJ / nB ? molI / nA : molJ / nB;
     var remI = (molI - e * nA) / n0[idA], remJ = air ? 0 : (molJ - e * nB) / n0[idB];
     if (air && S.atmosphere === "air") U2[j] += e * nB / AIR_OXYGEN;
@@ -541,6 +556,7 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     if (!air && !freeJ && idB !== H2O) { USED[j] = 1 - remJ; T[j] = solJ ? Math.min(tNew, 372) : tNew; }
     if (!freeI && idA === H2O) T[i] = Math.min(tNew, 372);
     if (!air && !freeJ && idB === H2O) T[j] = Math.min(tNew, 372);
+    var usedWater = freeJ && idB === H2O && !solJ, heldA = usedWater ? AUX[j] : 0, heldB = usedWater ? AUX2[j] : 0, shareA = 1 - USED[j], shareB = 1 - U2[j];
     var list = r.prods || [], gas = 0, slotI = freeI, slotJ = freeJ;
     for (var q = 0; q < list.length; q++) {
       var pid = list[q].id, share = n0[pid] > 0 ? e * list[q].n / n0[pid] : 0, guard = 0;
@@ -556,6 +572,8 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     }
     if (slotI) deposit(i, AIR, tNew, formI, solI);
     if (slotJ) deposit(j, AIR, tNew, formJ, solJ);
+    if (heldA) leaveBehind(j, heldA, shareA, tNew);
+    if (heldB) leaveBehind(j, heldB, shareB, tNew);
     // Gas from a condensed mixture needs room, and that is what builds pressure. A mole of gas in 1 cm3 would be about 25000 atmospheres; the factor is scaled down.
     if (condensed && gas > 0) { var dp = gas * 400; P[i] += dp > 60 ? 60 : dp; }
     if (r.violent) P[i] += r.violent * 150;
@@ -604,21 +622,25 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
   // pH of a water cell from what is dissolved in it. Strong acids and bases dissociate fully, weak ones through their Ka or Kb, salts of weak
   // acids hydrolyse, and a weak acid sharing a cell with its own salt is a buffer, by Henderson-Hasselbalch.
   var AN_ACID = { CH3COO: "CH3COOH", F: "HF", CO3: "H2CO3", HCO3: "H2CO3", CN: "HCN", ClO: "HClO", SO3: "H2SO3", S: "H2S", C2O4: "H2C2O4", PO4: "H3PO4", BO3: "H3BO3", NO2: "HNO2" };
+  // A fully stripped anion takes back its last proton first, so it goes by the acid's last pKa, not the first one listed for the acid.
+  var LAST_PKA = { CO3: 10.33, SO3: 7.2, S: 12.9, C2O4: 4.27, PO4: 12.35 };
+  // How much of a weak acid or base has ionised, by the exact quadratic. The usual square root gives more ions than there are molecules once it is dilute.
+  function ionised(K, c) { return (-K + Math.sqrt(K * K + 4 * K * c)) / 2; }
   function acidity(id, c) {
     var m = Mat.list[id], f = m.formula;
     if (m.acid) {
-      if (m.pKa !== undefined) return { h: Math.sqrt(Math.pow(10, -m.pKa) * c), oh: 0, pKa: m.pKa, c: c, acid: true };
+      if (m.pKa !== undefined) return { h: ionised(Math.pow(10, -m.pKa), c), oh: 0, pKa: m.pKa, c: c, acid: true };
       var at = Mat.atoms(f);
       return { h: c * (at && at.H ? Math.min(at.H, 2) : 1), oh: 0 };
     }
-    if (f === "NH3") return { h: 0, oh: Math.sqrt(1.8e-5 * c) };
+    if (f === "NH3") return { h: 0, oh: ionised(1.8e-5, c) };
     if (m.an === "OH" && m.catZ) {
       var sat = Mat.solubilityFromKsp(f), cc = sat !== undefined && c > sat ? sat : c;
       return { h: 0, oh: cc * (m.q || 1) };
     }
     if (m.an && AN_ACID[m.an] && ACID_PKA[AN_ACID[m.an]] !== undefined) {
-      var pKa = ACID_PKA[AN_ACID[m.an]], kb = Math.pow(10, pKa - 14);
-      return { h: 0, oh: Math.sqrt(kb * c), salt: AN_ACID[m.an], pKa: pKa, c: c };
+      var pKa = LAST_PKA[m.an] || ACID_PKA[AN_ACID[m.an]], kb = Math.pow(10, pKa - 14);
+      return { h: 0, oh: ionised(kb, c), salt: AN_ACID[m.an], pKa: pKa, c: c };
     }
     return { h: 0, oh: 0 };
   }
@@ -629,8 +651,9 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
       return ac.pKa + Math.log10(sl.c / ac.c);
     }
     var h = (a ? a.h : 0) + (b ? b.h : 0), oh = (a ? a.oh : 0) + (b ? b.oh : 0), net = h - oh;
-    if (Math.abs(net) < 2e-7) return 7 - Math.log10(1 + net / 1e-7 * 0.5 > 0.1 ? 1 + net / 1e-7 * 0.5 : 0.1);
-    return net > 0 ? -Math.log10(net) : 14 + Math.log10(-net);
+    // Water's own ions, exactly. Worked from whichever side is in excess, because subtracting from a strong base would lose every digit.
+    var root = Math.sqrt(net * net + 4e-14);
+    return net >= 0 ? -Math.log10((net + root) / 2) : 14 + Math.log10((root - net) / 2);
   };
   C.pH = function (i) {
     if (ID[i] !== H2O) return null;
@@ -705,13 +728,20 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     applyRule(i, j, x, y, z, r, T[i], true, true, sa, sb);
   }
 
-  // Above about 5000 K no compound survives.
+  // Above about 5000 K no compound survives. Each element keeps the atoms it had: the first takes over this cell and the rest find room nearby.
   function dissociate(i, id, t) {
     var m = Mat.list[id], at = m.isAlloy ? null : Mat.atoms(m.formula), syms = at ? Object.keys(at) : [];
-    if (!syms.length) { ID[i] = AIR; PH[i] = P_GAS; AUX[i] = 0; return true; }
-    var z0 = Mat.byFormula[syms[0]];
-    ID[i] = z0; PH[i] = S.phaseFor(z0, t, P_POWDER); AUX[i] = 0; PR[i] = 0; USED[i] = 0;
-    if (syms[1]) emit(i, Mat.byFormula[syms[1]], t);
+    if (!syms.length) { ID[i] = AIR; PH[i] = P_GAS; AUX[i] = 0; AUX2[i] = 0; return true; }
+    var moles = (id === H2O ? 1 : 1 - USED[i]) * Mat.n0[id], z0 = Mat.byFormula[syms[0]], own = moles * at[syms[0]] / Mat.n0[z0];
+    ID[i] = z0; PH[i] = S.phaseFor(z0, t, P_POWDER); AUX[i] = 0; AUX2[i] = 0; U2[i] = 0; PR[i] = 0; USED[i] = own < 1 ? 1 - own : 0;
+    for (var q = 0; q < syms.length; q++) {
+      var z = Mat.byFormula[syms[q]], share = q ? moles * at[syms[q]] / Mat.n0[z] : own - 1;
+      for (var guard = 0; share > 0.005 && guard < 16; guard++) {
+        var take = share < 1 ? share : 1;
+        if (!emit(i, z, t, take)) S.noteLost(take * Mat.n0[z] * Mat.list[z].M);
+        share -= take;
+      }
+    }
     return true;
   }
 
@@ -777,9 +807,21 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
       if (AUX2[i] > 0) {   // the two can also react with each other in place
         var rm = ruleFor(AUX[i], AUX2[i]);
         if (rm && t >= list[rm].minT && (!list[rm].maxT || t <= list[rm].maxT) && !list[rm].cat && !list[rm].light && !list[rm].elec && (!list[rm].need || !list[rm].need.length) && S.rf() < list[rm].p) {
-          var rr = list[rm], em = rr.prods || [{ id: rr.a, n: 1 }, { id: rr.b, n: 1 }];
+          var rr = list[rm], em = rr.prods || [{ id: rr.a, n: 1 }, { id: rr.b, n: 1 }], sa = AUX[i], sb = AUX2[i], na = rr.nA || 1, nb = rr.nB || 1;
+          // True amounts here too: the scarcer solute runs out and the other keeps what it has left. The heat goes by how much reacted, and water soaks up most of it, as in applyRule.
+          var ma = (1 - USED[i]) * Mat.n0[sa], mb = (1 - U2[i]) * Mat.n0[sb], ev = Math.min(ma / na, mb / nb), lefta = ma - ev * na, leftb = mb - ev * nb, whole = Math.min(Mat.n0[sa] / na, Mat.n0[sb] / nb);
           AUX[i] = 0; AUX2[i] = 0; USED[i] = 0; U2[i] = 0;
-          for (var pq = 0; pq < em.length; pq++) { var pp = em[pq].id; if (!pp || pp === H2O) continue; var pm0 = Mat.list[pp]; if (pm0.soluble && !AUX[i]) AUX[i] = pp; else emit(i, pp, t); }
+          if (lefta > 1e-9) { AUX[i] = sa; USED[i] = 1 - lefta / Mat.n0[sa]; }
+          if (leftb > 1e-9) { if (AUX[i]) { AUX2[i] = sb; U2[i] = 1 - leftb / Mat.n0[sb]; } else { AUX[i] = sb; USED[i] = 1 - leftb / Mat.n0[sb]; } }
+          T[i] = Math.max(30, Math.min(372, t + (rr.heat || 0) * 0.2 * ev / whole));
+          for (var pq = 0; pq < em.length; pq++) {
+            var pp = em[pq].id;
+            if (!pp || pp === H2O) continue;
+            var pm0 = Mat.list[pp], part = ev * em[pq].n / Mat.n0[pp], fill = part < 1 ? part : 1;
+            if (pm0.soluble && !AUX[i]) { AUX[i] = pp; USED[i] = 1 - fill; }
+            else if (pm0.soluble && !AUX2[i]) { AUX2[i] = pp; U2[i] = 1 - fill; }
+            else if (part > 0.005) emit(i, pp, t, fill);
+          }
           S.stats.reactions++; S.addLog(rr.msg, "chem"); if (C.onFire) C.onFire(rr);
           S.wakeI(i);
           return true;
@@ -802,14 +844,14 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     var j = i + dirs[S.rf() * 6 | 0], jd = ID[j];
     if (jd === WALL) return false;
 
-    // Dissolving. Solids dissolve slowly, miscible liquids and soluble gases faster.
-    if (id > 118 && jd === H2O && PH[j] === P_LIQUID && !AUX[j] && id !== H2O) {
+    // Dissolving, into either solute slot that is free. Solids dissolve slowly, miscible liquids and soluble gases faster.
+    if (id > 118 && jd === H2O && PH[j] === P_LIQUID && (!AUX[j] || !AUX2[j]) && AUX[j] !== id && AUX2[j] !== id && id !== H2O) {
       var m = Mat.list[id];
       if (m.soluble && ph <= P_GAS) {
         if (S.rf() < (ph <= P_POWDER ? 0.08 : 0.15)) {
           // A grain gives up only what the water can hold. Sparingly soluble salts saturate quickly and most of the grain stays.
           var have = 1 - USED[i], sat = Mat.saturation(id), give = have < sat ? have : sat;
-          AUX[j] = id; USED[j] = 1 - give;   // both shares of a full cell of this solute
+          if (AUX[j]) { AUX2[j] = id; U2[j] = 1 - give; } else { AUX[j] = id; USED[j] = 1 - give; }   // both shares of a full cell of this solute
           // Dissolving gives out or takes in its heat of solution, shared between the water and the grain. Eutectic freezing and boiling bound how far that goes.
           if (Mat.hsol[id]) {
             var dTs = -give * Mat.n0[id] * Mat.hsol[id] * 1000 / (Mat.cL[H2O] + Mat.cS[id] * give), hotter = T[j] + dTs;
@@ -836,6 +878,8 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
     var isSolJ = jd === H2O && PH[j] === P_LIQUID && AUX[j] > 0, b = isSolJ ? AUX[j] : jd;
     if (isSolI && b === AIR) return false;
     var k = ruleFor(a, b);
+    // A solute with nothing to react with here leaves the water itself to react. Dissolving something in water does not stop it being water.
+    if (!k && isSolJ) { k = ruleFor(a, H2O); if (k) { b = H2O; isSolJ = false; } }
     if (!k) {
       if (jd === H2O && PH[j] === P_LIQUID && id <= 118 && E(id).E0 != null && E(id).E0 < 0 && E(id).E0 > -1.2 && S.rf() < 0.0015 && neighbourHas(i, AIR) && S.atmosphere !== "argon") return rust(i, id);
       return false;
@@ -895,7 +939,7 @@ var Chem = (function (Math, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WALL, ELEC
       for (var n = 0; n < 6 && !done; n++) {
         var c = i + dirs[n];
         if (c === j) continue;
-        if (ID[c] === want) { ID[c] = AIR; PH[c] = P_GAS; AUX[c] = 0; USED[c] = 0; S.wakeI(c); done = true; }
+        if (ID[c] === want) { ID[c] = AIR; PH[c] = P_GAS; AUX[c] = 0; AUX2[c] = 0; USED[c] = 0; S.wakeI(c); done = true; }
         else if (ID[c] === H2O && AUX[c] === want) { AUX[c] = 0; done = true; }
       }
     }

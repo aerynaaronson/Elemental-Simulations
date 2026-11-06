@@ -251,7 +251,8 @@ var Scenes = (function () {
       build: function () {
         var cx = X(0.5), cz = Z(0.5), R0 = Math.floor(Math.min(W, D) * 0.2), a = f("(NH4)2Cr2O7");
         for (var y = 1; y <= R0; y++) Sim.forSphere(cx, y, cz, R0 - y + 1, function (x, yy, z) { if (yy === y) Sim.place(x, yy, z, a, P_POWDER, undefined, true); });
-        Sim.forSphere(cx, R0, cz, 2, function (x, y, z, i) { if (Sim.ID[i] !== AIR) Sim.T[i] = 520; });
+        // Dichromate conducts heat poorly, so a small warm spot dies out before it can light what is next to it.
+        Sim.forSphere(cx, R0, cz, Math.max(3, R0 >> 2), function (x, y, z, i) { if (Sim.ID[i] !== AIR) Sim.T[i] = 900; });
       }
     },
     {

@@ -16,7 +16,7 @@ var REACTIONS = [];
     ["2NO + O2 -> 2NO2", { p: 0.25 }],
     ["2CO + O2 -> 2CO2", { T: 880, p: 0.3, fl: "C" }],
     ["N2 + O2 -> 2NO", { T: 1800, p: 0.02 }],
-    ["2Cu + O2 -> 2CuO", { T: 600, p: 0.01 }],
+    ["2Cu + O2 -> 2CuO", { T: 600, p: 0.01, fl: "Cu" }],
     ["4Fe + 3O2 -> 2Fe2O3", { T: 1200, p: 0.1, fl: "Fe" }],
     ["3Fe + 2O2 -> Fe3O4", { T: 900, Tmax: 1200, p: 0.05, fl: "Fe" }],
     ["2Mg + O2 -> 2MgO", { T: 745, p: 0.25, fl: "Mg" }],
@@ -243,7 +243,7 @@ var REACTIONS = [];
   ]);
 
   G("Water reactions and hydrolysis", [
-    ["2Li + 2H2O -> 2LiOH + H2", { p: 0.012 }],
+    ["2Li + 2H2O -> 2LiOH + H2", { p: 0.012, fl: "Li", h: 60 }],
     ["2Na + 2H2O -> 2NaOH + H2", { p: 0.02, fl: "Na", h: 90 }],
     ["2K + 2H2O -> 2KOH + H2", { p: 0.08, fl: "K", h: 250, flame: 1 }],
     ["2Rb + 2H2O -> 2RbOH + H2", { p: 0.3, fl: "Rb", h: 280, flame: 1, v: 0.7 }],

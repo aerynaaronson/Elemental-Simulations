@@ -57,6 +57,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   S.init = function (w, h, d) {
     if (S.busy) S.idle();
     driverOwned = false;
+    S.tickN = 0;   // a fresh chamber must not depend on how long the last one ran
     W = S.W = w; H = S.H = h; D = S.D = d; WD = w * d; dx = 1; dz = w; dy = WD; N = WD * h;
     var A = Pool.alloc;
     ID = S.ID = A(Uint16Array, N); PH = S.PH = A(Uint8Array, N); T = S.T = A(Float32Array, N); PR = S.PR = A(Float32Array, N);
@@ -176,7 +177,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   function liquidRho(i, id) {
     var t = T[i], r;
     if (id === WATER) {
-      var c = t - 273.15, e = c - 3.98;
+      var c = (t < 230 ? 230 : t) - 273.15, e = c - 3.98;   // the fit blows up near 206 K, far below where any water stays liquid
       r = 1 - e * e * (c + 283) / (503570 * (c + 67.26));
       if (AUX[i]) r += (Mat.rhoS[AUX[i]] - r) * (1 - USED[i]);
       if (AUX2[i]) r += (Mat.rhoS[AUX2[i]] - r) * (1 - U2[i]);
@@ -242,7 +243,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   // Ballistic motion for grains and liquids. Fractions of a cell are resolved by chance, so slow speeds still average out correctly.
   // Top speed is 6 cells a tick, which stays well inside the 16-cell gap that makes multi-threading safe.
   function steps(v) { var a = v < 0 ? -v : v, n = a >> 3; if ((a & 7) && rf() * 8 < (a & 7)) n++; return n; }
-  function drag(v) { return v > 1 ? v - 1 - (v >> 4) : (v < -1 ? v + 1 - (v >> 4) : 0); }
+  function drag(v) { var a = v < 0 ? -v : v; if (a < 2) return 0; a = a - 1 - (a >> 4); return v < 0 ? -a : a; }   // works on the size of the speed, because shifting a negative number rounds it away from zero
   function ballistic(i, x, y, z, ph) {
     var vx = VX[i], vy = VY[i], vz = VZ[i], nx = steps(vx), ny = steps(vy), nz = steps(vz), moved = false;
     var sx = vx < 0 ? -1 : 1, sy = vy < 0 ? -1 : 1, sz = vz < 0 ? -1 : 1, count = nx > ny ? (nx > nz ? nx : nz) : (ny > nz ? ny : nz);
@@ -263,8 +264,8 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
           if (y + sy >= H - 1) { VY[i] = 0; ny = 0; continue; }
           swap(i, b); i = b; y += sy; moved = true;
         } else if (sy < 0 && ph === P_LIQUID) {
-          // A falling liquid hitting something throws its speed sideways: a splash.
-          var sp = (vy < 0 ? -vy : vy) >> 1, o = rnd() & 3;
+          // A falling liquid hitting something throws its speed sideways: a splash. Strong surface tension, as in molten metal, keeps more of it together.
+          var sp = (vy < 0 ? -vy : vy) >> (Mat.tension[ID[i]] > 0.3 ? 2 : 1), o = rnd() & 3;
           VX[i] = DIR_X[o] * sp; VZ[i] = DIR_Z[o] * sp; VY[i] = 0; ny = 0; nx = 0; nz = 0;
         } else if (sy < 0) {
           VY[i] = 0; VX[i] >>= 1; VZ[i] >>= 1; ny = 0;
@@ -327,12 +328,12 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   }
   S.addPressure = function (i, kPa) { P[i] += kPa; };
   // Boiling point rises with pressure, by Clausius-Clapeyron with Trouton's rule standing in for each liquid's own heat of vaporisation.
-  // Below 30 kPa is local noise from bubbles forming, not a sustained rise in the liquid's pressure. No liquid survives above the critical temperature, whatever the pressure.
+  // Below 30 kPa is local noise from bubbles forming, not a sustained rise in the liquid's pressure, and the rise counts from there so that the boiling point does not jump. No liquid survives above the critical temperature, whatever the pressure.
   // A pumped-out chamber boils things at its own low pressure.
   function boilingPoint(id, p) {
     var bp = S.atmosphere === "vacuum" ? Mat.bpVac[id] : Mat.bp[id];
     if (p <= 30) return bp;
-    bp *= 1 + 0.094 * Math.log(1 + p / 100);
+    bp *= 1 + 0.094 * Math.log(1 + (p - 30) / 100);
     return bp > Mat.crit[id] ? Mat.crit[id] : bp;
   }
   S.boilingPoint = boilingPoint;
@@ -500,7 +501,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     var vid = AUX[i], over = USED[i] - saturation(vid, t);
     if (over <= 0) return;
     USED[i] -= over;
-    if (rf() < over) { ID[i] = vid; PH[i] = phaseFor(vid, t, P_POWDER); PR[i] = 0; AUX[i] = 0; USED[i] = 0; U2[i] = 0; VX[i] = VY[i] = VZ[i] = 0; wake(x, y, z); }
+    if (rf() < over) { ID[i] = vid; PH[i] = phaseFor(vid, t, P_POWDER); PR[i] = 0; AUX[i] = 0; AUX2[i] = 0; USED[i] = 0; U2[i] = 0; VX[i] = VY[i] = VZ[i] = 0; wake(x, y, z); }
   }
 
   function moveGas(i, x, y, z, id, t) {
@@ -543,7 +544,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     if (r < pUp) { j = up; ny = y + 1; }
     else if (r < pUp + pDown) { j = down; ny = y - 1; }
     else { var o = rnd() & 3; nx = x + DIR_X[o]; nz = z + DIR_Z[o]; j = i + DIR_X[o] + DIR_Z[o] * dz; }
-    if (ny === H - 1 && !S.lid) { ID[i] = AIR; PH[i] = P_GAS; AUX[i] = 0; USED[i] = 0; U2[i] = 0; wake(x, y, z); return true; }
+    if (ny === H - 1 && !S.lid) { ID[i] = AIR; PH[i] = P_GAS; AUX[i] = 0; AUX2[i] = 0; USED[i] = 0; U2[i] = 0; wake(x, y, z); return true; }
     var jd = ID[j];
     if (jd === AIR) { swap(i, j); wake(x, y, z); wake(nx, ny, nz); return true; }
     if (PH[j] >= P_GAS && jd !== id) {
@@ -948,14 +949,14 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     if (Zs === 4 || (id === 2 && jd === 2)) {   // He + He gives Be-8, which falls apart at once unless a third helium arrives: the triple-alpha route
       var k = i + dirs[rnd() % 6];
       if (ID[k] !== 2 || k === j || k === i) return;
-      ID[k] = AIR; PH[k] = P_GAS; Zs = 6;
+      ID[k] = AIR; PH[k] = P_GAS; AUX2[k] = 0; Zs = 6;
     }
     if (Zs === 3 || Zs === 5 || (Zs < 6 && Zs !== 2)) { if (id !== 1 && jd !== 1) return; if (Zs !== 2) return; }
     var A1 = id === 1 ? 1 : ELEMENTS[id].m, A2 = jd === 1 ? 1 : ELEMENTS[jd].m;
     var dE = (BE[Zs] || 0) * (A1 + A2) - (BE[id] || 0) * A1 - (BE[jd] || 0) * A2;
     if (dE <= 0) return;
-    ID[j] = AIR; PH[j] = P_GAS; AUX[j] = 0;
-    ID[i] = Zs; PH[i] = P_PLASMA; T[i] = t + dE * 3e5; T[j] = t;
+    ID[j] = AIR; PH[j] = P_GAS; AUX[j] = 0; AUX2[j] = 0;
+    ID[i] = Zs; PH[i] = P_PLASMA; T[i] = t + dE * 3e5; T[j] = t; AUX2[i] = 0;
     S.stats.fusions++;
     S.addLog(ELEMENTS[id].s + " + " + ELEMENTS[jd].s + " → " + ELEMENTS[Zs].s + " (fusion)", "nuclear");
     spawnP(PT_GAMMA, x + 0.5, y + 0.5, z + 0.5, 2, 0, 6);

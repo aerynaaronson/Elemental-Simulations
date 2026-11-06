@@ -36,7 +36,7 @@ row("Gases", "Hydrogen density at 0 C", Sim.gasDensity(1, 273.15) * 1000, 0.0899
 row("Gases", "Xenon density at 0 C", Sim.gasDensity(54, 273.15) * 1000, 5.894, 2, "g/L");
 
 // Boiling point under pressure, by the model's Clausius-Clapeyron approximation. Measured: 120.2 C at 200 kPa absolute.
-row("Pressure", "Water boiling at 200 kPa", 373.15 * (1 + 0.094 * Math.log(2)), 393.4, 2, "K");
+row("Pressure", "Water boiling at 200 kPa", Sim.boilingPoint(WATER, 100), 393.4, 2, "K");
 
 row("Pressure", "Water's critical temperature", (reset(), Sim.boilingPoint(WATER, 1e7)), 647, 1, "K");
 row("Pressure", "Water boiling at 1 kPa", (Sim.atmosphere = "vacuum", Sim.boilingPoint(WATER, 0)), 280, 3, "K");
@@ -67,12 +67,12 @@ row("Vapour", "Water at 20 C", vapour("H2O", 293.15), 2.34, 25, "kPa");
 row("Vapour", "Water at 50 C", vapour("H2O", 323.15), 12.35, 20, "kPa");
 row("Vapour", "Ethanol at 20 C", vapour("C2H5OH", 293.15), 5.9, 25, "kPa");
 
-// Gravity: fall time goes as one over the root of g
-function fallTicks(g) { reset(); Sim.gravity = g; Sim.box(20, 34, 20, 21, 34, 21, 79, P_POWDER); let n = 0, y; do { Sim.tick(); n++; y = 99; for (let i = 0; i < Sim.ID.length; i++) if (Sim.ID[i] === 79) { const Y = Math.floor(i / (48 * 48)); if (Y < y) y = Y; } } while (y > 5 && n < 500); return n; }
+// Gravity: fall time goes as one over the root of g. Speed is resolved by chance, so this follows one grain over several runs: one run says little, and the fastest of a group runs early.
+function fallTicks(g) { let total = 0; for (let s = 1; s <= 24; s++) { reset(); Sim.seed(s); Sim.gravity = g; Sim.place(20, 34, 20, 79, P_POWDER); let n = 0, y; do { Sim.tick(); n++; y = 99; for (let i = 0; i < Sim.ID.length; i++) if (Sim.ID[i] === 79) { const Y = Math.floor(i / (48 * 48)); if (Y < y) y = Y; } } while (y > 5 && n < 500); total += n; } return total / 24; }
 row("Gravity", "Fall time, Moon over Earth", fallTicks(0.16) / fallTicks(1), Math.sqrt(1 / 0.16), 15);
 
-// Heat of solution, from a grain dissolving in a little water
-function dissolveRise(f) { reset(); Sim.atmosphere = "argon"; Sim.gravity = 0; const s = Mat.named(f); Sim.place(20, 20, 20, WATER, P_LIQUID, 293.15, true); Sim.place(21, 20, 20, s, P_POWDER, 293.15, true); const w = Sim.idx(20, 20, 20); for (let k = 0; k < 200; k++) { Sim.tick(); if (Sim.AUX[w]) break; } return Sim.T[w] - 293.15; }
+// Heat of solution, from a grain dissolving in a little water. Walled in, because a lone drop can drift away from the grain before it dissolves.
+function dissolveRise(f) { reset(); Sim.atmosphere = "argon"; Sim.gravity = 0; const s = Mat.named(f); Sim.box(19, 19, 19, 22, 21, 21, 120, P_STATIC); Sim.place(20, 20, 20, WATER, P_LIQUID, 293.15, true); Sim.place(21, 20, 20, s, P_POWDER, 293.15, true); const w = Sim.idx(20, 20, 20); for (let k = 0; k < 2000; k++) { Sim.tick(); if (Sim.AUX[w]) break; } return Sim.T[w] - 293.15; }
 row("Solutions", "Heat released dissolving KOH at its saturation, per the table", -Mat.hsol[Mat.named("KOH")], 57.6, 1, "kJ/mol");
 row("Solutions", "Cold from dissolving KNO3 to saturation", dissolveRise("KNO3"), -19, 40, "K");
 
