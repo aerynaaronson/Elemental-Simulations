@@ -1,0 +1,316 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>Elemental Simulations</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sometype+Mono:wght@400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* Layout concept: a laboratory chamber fills the window, with the periodic table docked beneath it like a wall chart. */
+:root {
+  --ink: #0d1016; --panel: #151922; --panel-2: #1d222d; --line: #2c3340; --fg: #e8ebf0; --dim: #98a2b3; --faint: #6a7486; --accent: #f2b544; --hot: #ff7a45; --cold: #6cc4ff; --good: #7bd88f;
+  --c-nonmetal: #4f9d69; --c-noble: #8b6fd8; --c-alkali: #d9534f; --c-alkaline: #e08a3c; --c-metalloid: #2f9e9e; --c-halogen: #c9b02d; --c-post: #5f88b8; --c-transition: #4c6a96; --c-lanthanide: #b45f9c; --c-actinide: #a84a6f;
+  --mono: "Sometype Mono", ui-monospace, "Cascadia Mono", Consolas, monospace; --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --cell: clamp(19px, 2.75vh, 33px);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body { background: var(--ink); color: var(--fg); font: 13px/1.4 var(--sans); display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+button, select, input { font: inherit; color: inherit; }
+button { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 4px 9px; cursor: pointer; white-space: nowrap; }
+button:hover { border-color: var(--faint); }
+button[aria-pressed="true"] { background: var(--accent); color: #1a1405; border-color: var(--accent); font-weight: 600; }
+button:focus-visible, select:focus-visible, input:focus-visible, .el:focus-visible { outline: 2px solid var(--cold); outline-offset: 1px; }
+select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; max-width: 100%; }
+label { color: var(--dim); }
+input[type=range] { accent-color: var(--accent); width: 100%; margin: 0; }
+.mono { font-family: var(--mono); }
+
+#top { display: flex; align-items: center; gap: 12px; padding: 6px max(12px, env(safe-area-inset-right, 0px)) 6px max(12px, env(safe-area-inset-left, 0px)); background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#brand { font-weight: 700; letter-spacing: .01em; font-size: 15px; display: flex; align-items: baseline; gap: 7px; }
+#brand small { font: 500 11px var(--mono); color: var(--faint); }
+.group { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+#stats { font: 11px var(--mono); color: var(--dim); white-space: nowrap; }
+
+#main { flex: 1; min-height: 0; display: flex; position: relative; }
+#viewWrap { flex: 1; min-width: 0; position: relative; background: #000; }
+#view { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+#probe { position: absolute; left: 10px; bottom: 10px; padding: 7px 10px; background: rgba(13,16,22,.84); border: 1px solid var(--line); border-radius: 5px; font: 12px var(--mono); pointer-events: none; min-width: 210px; max-width: calc(100% - 20px); }
+#probe b { font-family: var(--sans); font-size: 13px; }
+#sceneNote { position: absolute; left: 10px; top: 10px; max-width: min(430px, calc(100% - 20px)); padding: 8px 11px; background: rgba(13,16,22,.84); border: 1px solid var(--line); border-radius: 5px; }
+#sceneNote h2 { font-size: 14px; margin: 0 0 2px; text-wrap: balance; }
+#sceneNote p { margin: 0; color: var(--dim); font-size: 12.5px; }
+#noteClose { position: absolute; right: 4px; top: 4px; border: 0; background: none; color: var(--faint); padding: 1px 6px; }
+#noteAction { margin-top: 7px; background: var(--accent); color: #1a1405; border-color: var(--accent); font-weight: 600; }
+#legend { position: absolute; right: 10px; top: 10px; font: 11px var(--mono); color: var(--dim); background: rgba(13,16,22,.84); border: 1px solid var(--line); border-radius: 5px; padding: 6px 9px; display: grid; gap: 1px; }
+#loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim); font: 13px var(--mono); }
+#noGL { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; padding: 24px; text-align: center; color: var(--dim); }
+
+#side { width: 292px; flex: none; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 13px; }
+#side h3 { margin: 0 0 5px; font: 600 10.5px var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--faint); }
+#card .sym { font: 600 40px/1 var(--mono); }
+#card .head { display: flex; gap: 11px; align-items: center; }
+#swatch { width: 54px; height: 54px; border-radius: 4px; border: 1px solid var(--line); flex: none; }
+#card .name { font-size: 16px; font-weight: 600; }
+#card .sub { color: var(--dim); font-size: 12px; }
+#facts { display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 1px; margin: 8px 0 0; font-size: 12px; }
+#facts dt { color: var(--dim); }
+#facts dd { margin: 0; font-family: var(--mono); text-align: right; font-size: 11.5px; overflow-wrap: anywhere; }
+#facts .est::after { content: " est"; color: var(--accent); font-size: 10px; }
+#note { margin: 8px 0 0; font-size: 12.5px; color: #c9ced8; }
+.row { display: grid; grid-template-columns: 82px 1fr 62px; gap: 7px; align-items: center; margin-bottom: 5px; font-size: 12px; }
+.row output { font: 11px var(--mono); text-align: right; color: var(--fg); }
+#census .bar { display: grid; grid-template-columns: 48px 1fr 46px; gap: 6px; align-items: center; font: 11px var(--mono); margin-bottom: 2px; }
+#census .track { height: 7px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
+#census .fill { height: 100%; border-radius: 2px; }
+#census .n { text-align: right; color: var(--dim); }
+#log { font: 11.5px var(--mono); max-height: 170px; overflow-y: auto; display: grid; gap: 1px; }
+#log div { display: flex; justify-content: space-between; gap: 8px; }
+#log .nuclear { color: var(--good); } #log .burn { color: var(--hot); } #log .chem { color: var(--cold); }
+#log span:last-child { color: var(--faint); flex: none; }
+.empty { color: var(--faint); font-size: 12px; }
+
+#dock { flex: none; background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+#dockBar { display: flex; gap: 8px; align-items: center; padding: 5px max(12px, env(safe-area-inset-right, 0px)) 5px max(12px, env(safe-area-inset-left, 0px)); flex-wrap: wrap; }
+#tableScroll { overflow-x: auto; padding: 0 max(12px, env(safe-area-inset-right, 0px)) 8px max(12px, env(safe-area-inset-left, 0px)); }
+#ptable { display: grid; grid-template-columns: repeat(18, minmax(38px, 1fr)); grid-auto-rows: var(--cell); gap: 2px; min-width: 760px; }
+.el { position: relative; border: 0; border-radius: 3px; padding: 0; background: var(--c); color: #fff; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1; overflow: hidden; }
+.el b { font: 600 clamp(11px, 1.55vh, 13.5px) var(--mono); }
+.el i { font: 400 8px var(--mono); position: absolute; left: 2px; top: 1px; font-style: normal; opacity: .72; }
+.el u { position: absolute; right: 2px; top: 2px; width: 5px; height: 5px; border-radius: 50%; text-decoration: none; }
+.el.liquid u { background: #6cc4ff; } .el.gas u { background: #fff; opacity: .8; } .el.rad::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: #bff36a; }
+.el:hover { filter: brightness(1.25); }
+.el[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 0; z-index: 2; }
+.el.dimmed { filter: saturate(.3) brightness(.55); }
+#keyRow { grid-column: 3 / span 10; grid-row: 1 / span 3; display: flex; flex-wrap: wrap; gap: 3px 9px; align-items: center; align-content: center; font-size: 11px; color: var(--dim); padding: 0 6px; }
+#keyRow span { display: inline-flex; gap: 4px; align-items: center; }
+#keyRow s { display: inline-block; width: 10px; height: 10px; border-radius: 2px; text-decoration: none; }
+#compounds { display: none; flex-wrap: wrap; gap: 3px; min-height: 66px; align-content: flex-start; max-height: calc(var(--cell) * 10.5); overflow-y: auto; }
+#reactions { display: none; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 2px 8px; max-height: calc(var(--cell) * 10.5); overflow-y: auto; }
+.rx { display: flex; justify-content: space-between; gap: 10px; text-align: left; white-space: normal; background: none; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 3px 4px; font: 12px var(--mono); }
+.rx:hover { background: var(--panel-2); }
+.rx em { font-style: normal; color: var(--dim); font-size: 10.5px; flex: none; text-align: right; max-width: 40%; }
+#search { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 7px; width: 170px; }
+#coreHint { font-size: 11px; color: var(--accent); }
+#lessonBox, #lessonMenu { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(560px, calc(100% - 28px)); padding: 10px 13px; background: rgba(13,16,22,.94); border: 1px solid var(--accent); border-radius: 6px; z-index: 5; }
+#lessonBox h2, #lessonMenu h2 { margin: 0 0 3px; font-size: 14px; }
+#lessonBox p { margin: 0 0 7px; font-size: 13px; color: #d4d8e0; }
+#lessonList { display: grid; gap: 3px; margin: 5px 0 8px; }
+#lessonList button { text-align: left; }
+#lessonStep { margin-left: auto; color: var(--dim); font-size: 11px; }
+#record[aria-pressed="true"] { background: #d0453a; color: #fff; border-color: #d0453a; }
+#journal { display: none; max-height: calc(var(--cell) * 10.5); overflow-y: auto; font: 12px var(--mono); }
+#journal .head { font: 600 13px var(--sans); margin-bottom: 4px; }
+#journal .list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1px 10px; color: #c9ced8; }
+.rx.found span::before { content: "\2713  "; color: var(--good); }
+button:disabled { opacity: .4; cursor: default; }
+body.compact { --cell: 16px; }
+body.compact .el i, body.compact .el u { display: none; }
+body.compact .el b { font-size: 10.5px; }
+body.compact #keyRow { display: none; }
+#recent button { padding: 2px 7px; font: 600 12px var(--mono); }
+.graph { position: relative; margin-bottom: 8px; }
+.graph .gh { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); }
+.graph .gh b { font: 500 12px var(--mono); color: var(--fg); }
+.graph canvas { width: 100%; height: 46px; display: block; }
+.graph .tip { position: absolute; top: 18px; padding: 1px 5px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 3px; font: 11px var(--mono); pointer-events: none; white-space: nowrap; }
+#toast { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 5px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; font-size: 13px; pointer-events: none; }
+#reactsWith { margin-top: 8px; font-size: 12px; }
+#reactsWith summary { cursor: pointer; color: var(--accent); }
+#reactsWith div { max-height: 180px; overflow-y: auto; margin-top: 4px; }
+#reactsWith p { margin: 0 0 1px; font: 11px var(--mono); color: #c9ced8; }
+.cp { display: flex; align-items: center; gap: 5px; padding: 3px 8px 3px 4px; border-radius: 3px; }
+.cp s { display: inline-block; width: 14px; height: 14px; border-radius: 2px; text-decoration: none; border: 1px solid rgba(255,255,255,.2); }
+.cp b { font: 500 12px var(--mono); }
+#help { position: fixed; inset: 0; background: rgba(5,7,10,.72); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 20; }
+#help[hidden] { display: none; }
+#help > div { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; max-width: 700px; max-height: 88%; overflow-y: auto; padding: 18px 22px; }
+#help h2 { margin: 0 0 8px; font-size: 18px; }
+#help h3 { margin: 14px 0 4px; font-size: 13px; color: var(--accent); }
+#help p, #help li { color: #c9ced8; max-width: 65ch; }
+#help ul { padding-left: 18px; margin: 4px 0; }
+kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width: 2px; background: var(--panel-2); padding: 0 4px; border-radius: 3px; }
+@media (max-height: 760px) { .el i { display: none; } }
+@media (max-width: 860px) {
+  :root { --cell: 30px; }
+  body { overflow: auto; }
+  html, body { height: auto; overflow: auto; }
+  #main { flex-direction: column; flex: none; }
+  #viewWrap { height: 56vh; flex: none; }
+  #side { width: 100%; border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+  #legend { display: none; }
+}
+</style>
+
+<div id="top">
+  <div id="brand">Elemental Simulations <small>118 elements</small></div>
+  <div class="group" role="group" aria-label="Tools" id="tools"></div>
+  <div class="group">
+    <label for="scene">Experiment</label>
+    <select id="scene"></select>
+  </div>
+  <div class="spacer"></div>
+  <div class="group">
+    <button id="pause" title="Space">Pause</button>
+    <button id="step" title="Advance one tick">Step</button>
+    <button id="undo" title="Ctrl+Z" disabled>Undo</button>
+    <button id="redo" title="Ctrl+Y" disabled>Redo</button>
+    <button id="save" title="Save the chamber to a file">Save</button>
+    <button id="load" title="Load a saved chamber">Load</button>
+    <input id="loadFile" type="file" accept=".elemental" hidden>
+    <button id="clear">Clear chamber</button>
+    <button id="record" title="Record a video clip of the chamber">Record</button>
+    <button id="share" title="Copy a link to this experiment or reaction">Share</button>
+    <button id="lessonsBtn">Lessons</button>
+    <button id="helpBtn">Guide</button>
+  </div>
+  <div id="stats"></div>
+  <div id="coreHint" hidden>Using one CPU core. Open with Start Elemental.bat to use them all.</div>
+</div>
+
+<div id="main">
+  <div id="viewWrap">
+    <canvas id="view" aria-label="3D simulation chamber"></canvas>
+    <div id="loading">Preparing the chamber</div>
+    <div id="noGL">This simulation needs WebGL2. Turn on hardware acceleration in your browser settings, then reload.</div>
+    <div id="sceneNote"><button id="noteClose" aria-label="Hide note">×</button><h2 id="noteTitle"></h2><p id="noteText"></p><button id="noteAction" hidden></button></div>
+    <div id="legend">
+      <div><span style="color:#73f2ff">●</span> neutron</div><div><span style="color:#ffbf4d">●</span> alpha</div><div><span style="color:#66bfff">●</span> beta</div><div><span style="color:#d9ffa6">●</span> gamma</div>
+    </div>
+    <div id="lessonBox" hidden><h2 id="lessonTitle"></h2><p id="lessonText"></p><div class="group"><button id="lessonNext">Next</button><button id="lessonClose">Close</button><span id="lessonStep" class="mono"></span></div></div>
+    <div id="lessonMenu" hidden><h2>Lessons</h2><div id="lessonList"></div><button id="lessonMenuClose">Close</button></div>
+    <div id="probe"></div>
+    <div id="toast" hidden></div>
+  </div>
+  <aside id="side">
+    <section id="card" aria-live="polite">
+      <div class="head"><div id="swatch"></div><div><div class="sym" id="cSym"></div></div><div><div class="name" id="cName"></div><div class="sub" id="cSub"></div></div></div>
+      <dl id="facts"></dl>
+      <p id="note"></p>
+      <details id="reactsWith" hidden></details>
+    </section>
+    <section>
+      <h3>Brush</h3>
+      <div class="row"><label for="size">Size</label><input id="size" type="range" min="0" max="14" step="1" value="3"><output id="sizeO"></output></div>
+      <div class="row"><label for="height">Height</label><input id="height" type="range" min="0" max="60" step="1" value="26"><output id="heightO"></output></div>
+      <div class="row"><label for="ptemp">Place at</label><input id="ptemp" type="range" min="0" max="100" step="1" value="0"><output id="ptempO"></output></div>
+      <div class="row"><label for="shape">Shape</label><select id="shape" style="grid-column: span 2"><option value="sphere">Sphere</option><option value="cube">Cube</option><option value="disc">Flat disc</option><option value="spray">Spray</option></select></div>
+      <div class="row" id="isoRow" hidden><label for="isotope">Isotope</label><select id="isotope" style="grid-column: span 2"></select></div>
+      <div class="group" role="group" aria-label="Solid form">
+        <button id="fGrains" aria-pressed="true" title="Solids pour and pile">Grains</button>
+        <button id="fBlock" aria-pressed="false" title="Solids stay where placed">Fixed block</button>
+      </div>
+    </section>
+    <section>
+      <h3>Environment</h3>
+      <div class="row"><label for="amb">Room temp</label><input id="amb" type="range" min="0" max="100" step="1"><output id="ambO"></output></div>
+      <div class="row"><label for="speed">Speed</label><input id="speed" type="range" min="0" max="4" step="1" value="2"><output id="speedO"></output></div>
+      <div class="row"><label for="decay">Decay rate</label><input id="decay" type="range" min="0" max="4" step="1" value="1"><output id="decayO"></output></div>
+      <div class="row"><label for="atm">Atmosphere</label><select id="atm" style="grid-column: span 2"><option value="air">Air (21% O₂)</option><option value="oxygen">Pure oxygen</option><option value="argon">Argon (inert)</option><option value="vacuum">Vacuum</option></select></div>
+      <div class="row"><label for="gridSize">Chamber</label><select id="gridSize" style="grid-column: span 2"><option value="64,48,64">Small, 197 k cells</option><option value="96,64,96">Medium, 590 k cells</option><option value="128,80,128">Large, 1.3 M cells</option><option value="160,96,160">Huge, 2.5 M cells</option><option value="224,128,224">Giant, 6.4 M cells</option></select></div>
+      <div class="group">
+        <button id="lid" aria-pressed="false" title="Seal the top so gases cannot escape">Lid</button>
+        <button id="grav" aria-pressed="true" title="Cycle through Earth, Moon and heavy gravity, then none">Gravity 1 g</button>
+        <button id="collapse" aria-pressed="true" title="Unsupported solids fall as rigid pieces">Collapse</button>
+        <button id="heatView" aria-pressed="false" title="Colour by temperature">Heat view</button>
+        <button id="phView" aria-pressed="false" title="Colour water by pH">pH view</button>
+        <button id="fluidBtn" aria-pressed="true" title="Simulate air currents">Air flow</button>
+      </div>
+    </section>
+    <section>
+      <h3>Readings</h3>
+      <div id="graphs"></div>
+      <div class="group"><button id="pin" title="P: follow the cell under the cursor">Pin a cell</button></div>
+    </section>
+    <section>
+      <h3>Census</h3>
+      <div id="census"></div>
+    </section>
+    <section>
+      <h3>Reactions</h3>
+      <div id="log"></div>
+    </section>
+  </aside>
+</div>
+
+<div id="dock">
+  <div id="dockBar">
+    <div class="group" role="group" aria-label="Palette">
+      <button id="tabEl" aria-pressed="true">Periodic table</button>
+      <button id="tabCp" aria-pressed="false">Compounds</button>
+      <button id="tabRx" aria-pressed="false">Reactions</button>
+      <button id="tabJn" aria-pressed="false" title="Reactions you have seen so far">Journal</button>
+      <button id="tabHide" aria-pressed="false" title="T">Hide</button>
+      <button id="compact" aria-pressed="false" title="Make the periodic table smaller">Compact</button>
+    </div>
+    <div id="recent" class="group" aria-label="Recent materials"></div>
+    <input id="search" type="search" placeholder="Search" aria-label="Search elements, compounds and reactions">
+    <select id="rxGroup" aria-label="Reaction group" hidden></select>
+    <span id="rxCount" class="mono" hidden></span>
+    <div class="group"><label for="filter">Highlight</label>
+      <select id="filter">
+        <option value="">Nothing</option><option value="liquid">Liquid at room temp</option><option value="gas">Gas at room temp</option><option value="rad">Radioactive</option><option value="fissile">Fissile</option><option value="magnet">Ferromagnetic</option><option value="super">Superconducting</option><option value="absorber">Neutron absorber</option><option value="water">Reacts with water</option><option value="est">Bulk properties predicted</option>
+      </select>
+    </div>
+  </div>
+  <div id="tableScroll">
+    <div id="ptable"></div>
+    <div id="compounds"></div>
+    <div id="reactions"></div>
+    <div id="journal"></div>
+  </div>
+</div>
+
+<div id="help" hidden>
+  <div role="dialog" aria-label="Guide">
+    <h2>Guide</h2>
+    <p>Pick an element or compound, then draw into the chamber. Every cell carries a real temperature in kelvin, and behaviour comes from each element's measured properties.</p>
+    <h3>Controls</h3>
+    <ul>
+      <li><b>Left drag:</b> use the current tool. <b>Right drag:</b> orbit. <b>Middle drag</b> or <kbd>Shift</kbd> + right drag: pan. <b>Wheel:</b> zoom.</li>
+      <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> undo, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redo. <kbd>P</kbd> pins the cell under the cursor and graphs its temperature.</li>
+      <li><kbd>[</kbd> <kbd>]</kbd> brush size. <kbd>1</kbd>–<kbd>9</kbd> tools. <kbd>Space</kbd> pause. <kbd>T</kbd> hide the table. <kbd>H</kbd> heat view.</li>
+      <li><b>Height</b> sets how far above the surface you pour. Set it to 0 to paint directly on surfaces.</li>
+      <li><b>Place at</b> sets the starting temperature, so you can pour liquid nitrogen at 70 K or molten iron at 2000 K.</li>
+    </ul>
+    <h3>What is real</h3>
+    <ul>
+      <li>Melting and boiling points, density by phase, specific heat, thermal conductivity, latent heats, electronegativity, ionisation energy, oxidation states, electrode potentials, electrical conductivity, Curie points, superconducting temperatures, neutron cross-sections, half-lives and decay modes.</li>
+      <li>Compound formulas come from real oxidation states. Common compounds use measured data; the rest are estimated and marked <i>est</i>.</li>
+      <li>The Reactions tab lists every equation in the database, each one checked for atom balance. Click one to run it in a small test rig. Reaction heat comes from heats of formation wherever they are known.</li>
+      <li>Gibbs energy decides how far a reaction can go at a given temperature and pressure, from measured enthalpies and entropies where all are known. Reversible reactions settle at their real equilibrium side.</li>
+      <li>Cells hold true moles from density and formula mass. Elements carry isotopes, with real half-lives and decay modes. Water cells report pH, with buffers and solubility products.</li>
+      <li>Beyond the database, families of rules cover every metal: acids with bases, carbonates and oxides, thermal decomposition, precipitation by solubility rules, and displacement by electrode potential.</li>
+      <li>Gas density follows the ideal gas law, so hot gas rises and xenon sinks. Heating curves plateau at phase changes because latent heat is banked.</li>
+    </ul>
+    <h3>What is simplified</h3>
+    <ul>
+      <li>Half-lives are compressed on a log scale so that a 14-billion-year nuclide and a millisecond one can both be watched. Their order is preserved.</li>
+      <li>Heat conduction is compressed by a square root, so copper and water can both move at a visible pace. Latent heats run at half value.</li>
+      <li>Each voxel is one bulk lump of material, not an atom. Gases are treated as a cell of condensed-density material, which is far denser than a real gas. Air is an endless oxygen supply.</li>
+      <li>Activation energies are derived from each reaction's onset temperature, not measured. Thermodynamic values are at 298 K and do not change with temperature, apart from water turning to steam.</li>
+      <li>Dissolved salts are tracked as salts that behave as their ions, not as separate ions. pH is calculated for at most two solutes in a cell, ignoring activity effects and metal-ion acidity.</li>
+      <li>Pressure is a simple spreading field in kPa, without a full fluid solver. Burst strength is a rough estimate from melting point.</li>
+      <li>Fission chances per isotope are simplified, and the small grid needs fuel far richer than real reactors. Fusion is a simplified path up the binding-energy curve.</li>
+      <li>For elements past about Z = 100, bulk properties have never been measured. Those values are theoretical predictions, marked <i>est</i>.</li>
+    </ul>
+    <p style="margin-top:12px"><button id="helpClose">Close</button></p>
+  </div>
+</div>
+
+<script src="js/elements.data.js"></script>
+<script src="js/elements.js"></script>
+<script src="js/isotopes.data.js"></script>
+<script src="js/species.js"></script>
+<script src="js/materials.js"></script>
+<script src="js/reactions.js"></script>
+<script src="js/pool.js"></script>
+<script src="js/sim.js"></script>
+<script src="js/chem.js"></script>
+<script src="js/shade.js"></script>
+<script src="js/render.js"></script>
+<script src="js/scenes.js"></script>
+<script src="js/ui.js"></script>
