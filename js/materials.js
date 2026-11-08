@@ -127,6 +127,8 @@ var Mat = (function () {
     29: "#3a9fd8", 28: "#5bbf7a", 27: "#d65a8a", 26: "#c08a3a", 24: "#3f8f5e", 25: "#e8b4c0", 23: "#6f4fb0", 79: "#d8b020", 78: "#c89040", 46: "#a86838", 45: "#a04848", 44: "#5a3a30",
     77: "#5a4038", 76: "#605850", 59: "#9fd08a", 60: "#b98ac0", 62: "#e8e0a0", 63: "#f0d0d8", 68: "#e8a0b0", 67: "#e8d080", 69: "#a8e0c0", 92: "#d4d040", 93: "#70a070", 94: "#905030", 95: "#c89080"
   };
+  // Approximate molar absorptivity in visible light, L/mol/cm, for solutes far more strongly coloured than copper sulfate (about 12).
+  var TINT_EPS = { "Fe(SCN)3": 4700, KMnO4: 2400, "[Cu(NH3)4]SO4": 55, K2CrO4: 300, K2Cr2O7: 400, FeCl3: 50, "Fe(NO3)3": 50, "Fe2(SO4)3": 50, AuCl3: 300, HAuCl4: 300, I2: 700 };
   // Measured properties. mp, bp in K, rho in g/cm3, cp in J/g/K, k in W/m/K, hf and hv in kJ/mol.
   var KNOWN = {
     H2O: { name: "Water", mp: 273.15, bp: 373.15, rho: 0.917, rhoL: 1, cp: 4.18, k: 2.2, kL: 0.6, hf: 6.01, hv: 40.65, col: "#dcecff", colL: "#2f7fc8", colG: ["#f0f4f8", 34], note: "Ice floats because water expands as it freezes. High heat capacity makes it hold a boil at 100 C.", visc: 0.03, decT: 3500 },
@@ -272,6 +274,9 @@ var Mat = (function () {
     };
     var solCol = (known && known.colSol) || (e && ION_COL[e.z]) || null;
     m.solutionCol = solCol ? hex(solCol) : null;
+    // Molarity at which a solution shows half its full colour. Copper sulfate, a weak absorber, sets the scale at 0.3 M, and stronger absorbers
+    // go by their molar absorptivity relative to it, so a few drops of thiocyanate turn iron(III) blood red as they really do.
+    m.tintM = TINT_EPS[formula] ? 3.6 / TINT_EPS[formula] : 0.3;
     m.soluble = known && known.sol !== undefined ? !!known.sol : (spec.an ? solubility(spec.catZ, spec.an) : false);
     if (SALT_KSP[formula] > 1e-7) m.soluble = true;   // limewater, plaster and lead chloride dissolve a little
     if (m.id >= MAX_MATERIALS) { nextId = MAX_MATERIALS - 1; }

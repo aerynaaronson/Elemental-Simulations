@@ -1,0 +1,22 @@
+{
+  "name": "elemental-simulations",
+  "productName": "Elemental Simulations",
+  "version": "0.1.0",
+  "description": "A chemistry sandbox: explore reactions by handling real materials.",
+  "main": "desktop/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "smoke": "node desktop/smoke.js",
+    "test": "node tools/run_tests.js",
+    "test:full": "node tools/run_tests.js --full",
+    "bench": "node tools/bench.js",
+    "screenshots": "node tools/take_screenshots.js",
+    "package:win": "electron-packager . \"Elemental Simulations\" --platform=win32 --arch=x64 --out=dist --overwrite --no-asar --ignore=\"^/dist\" --ignore=\"^/tools\" --ignore=\"^/docs\" --ignore=\"^/_to_delete\" --ignore=\"^/\\.claude\" --ignore=\"^/ROADMAP\\.md$\" --ignore=\"^/VALIDATION\\.md$\" --ignore=\"\\.bat$\"",
+    "steam:prepare": "node tools/steam_build.js"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "electron": "^45.2.3"
+  }
+}

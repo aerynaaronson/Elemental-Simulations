@@ -3,7 +3,9 @@ function startElemental() {
   var $ = function (id) { return document.getElementById(id); };
   // One helper per physical core, less the main thread. navigator reports logical threads, so halve it.
   var helpers = Pool.init(Math.max(0, Math.min(15, Math.ceil((navigator.hardwareConcurrency || 2) / 2) - 1)), function (d) { if (d.type === "log") Sim.mergeLog(d.entries); });
-  var GRID = helpers >= 7 ? { w: 160, h: 96, d: 160 } : { w: 96, h: 64, d: 96 };
+  // Sized to hold 30 ticks a second in a busy scene. A 12-thread machine manages 24 to 30 at Large, but only 10 to 24 at Huge. Larger chambers stay a choice in the menu.
+  var GRID = helpers >= 7 ? { w: 128, h: 80, d: 128 } : { w: 96, h: 64, d: 96 };
+  if (Settings.get("chamber") !== "auto") { var sized = Settings.get("chamber").split(",").map(Number); GRID = { w: sized[0], h: sized[1], d: sized[2] }; }
   var canvas = $("view");
   var TOOLS = [
     { id: "place", label: "Place", tip: "Pour the selected material" },
@@ -15,7 +17,8 @@ function startElemental() {
     { id: "magnet", label: "Magnet", tip: "Attract ferromagnets below their Curie point" },
     { id: "blast", label: "Blast", tip: "Set off a blast wave" },
     { id: "uv", label: "UV lamp", tip: "Shine ultraviolet light to drive photochemistry" },
-    { id: "orbit", label: "Orbit", tip: "Drag to turn the view (useful on touch screens)" }
+    { id: "orbit", label: "Orbit", tip: "Drag to turn the view (useful on touch screens)" },
+    { id: "vessel", label: "Lab", tip: "Containers, hot plates and chillers: set down, carry, tip, heat and cool", key: "B" }
   ];
   var CATS = { nonmetal: "Reactive nonmetal", noble: "Noble gas", alkali: "Alkali metal", alkaline: "Alkaline earth", metalloid: "Metalloid", halogen: "Halogen", post: "Post-transition metal", transition: "Transition metal", lanthanide: "Lanthanide", actinide: "Actinide" };
   var state = { shape: "sphere", undo: [], redo: [], recent: [], pinned: null, pinnedSeries: [], tool: "place", mat: 11, form: P_POWDER, brush: 3, height: 26, placeT: null, paused: false, speed: 1, pointer: null, painting: false, tab: "el", hover: null };
@@ -112,10 +115,25 @@ function startElemental() {
       b.dataset.search = (m.name + " " + m.formula).toLowerCase();
       b.addEventListener("click", selectFromEvent);
       b.addEventListener("mouseenter", hoverEl);
+      b.dataset.kind = compoundKinds(id, m, phase);
       elButtons[id] = b;
       frag.appendChild(b);
     });
     box.appendChild(frag);
+  }
+  // Which groups of the compound filter a material belongs to, as a space-separated list.
+  function compoundKinds(id, m, phase) {
+    var k = [];
+    if (id === WALL || id === ELECTRODE) return "";
+    if (m.acid) k.push("acid");
+    if (m.base) k.push("base");
+    if (m.isAlloy) k.push("alloy");
+    else if (m.an === "O") k.push("oxide");
+    else if (m.catZ && m.an && !m.acid && !m.base) k.push("salt");
+    // Organic by the usual convention: carbon with hydrogen, but not carbonates, cyanides and thiocyanates, which chemists count as inorganic.
+    if (!m.isAlloy && m.formula && !/CO3|CN|SCN/.test(m.formula)) { var at = Mat.atoms(m.formula); if (at && at.C && at.H) k.push("organic"); }
+    if (phase >= P_GAS) k.push("gas"); else if (phase === P_LIQUID) k.push("liquid");
+    return k.join(" ");
   }
 
   // ---- Reaction browser ----
@@ -160,11 +178,16 @@ function startElemental() {
       b.hidden = !on; if (on) shown++;
     });
     if (state.tab === "rx") $("rxCount").textContent = shown + " of " + Chem.database.length + " equations";
-    document.querySelectorAll("#compounds .cp").forEach(function (b) { b.hidden = !!q && (b.dataset.search || "").indexOf(q) < 0; });
+    var kind = $("cpGroup").value, favs = Settings.get("favourites");
+    document.querySelectorAll("#compounds .cp").forEach(function (b) {
+      var inKind = !kind || (kind === "fav" ? favs.indexOf(+b.dataset.z) >= 0 : (" " + b.dataset.kind + " ").indexOf(" " + kind + " ") >= 0);
+      b.hidden = (!!q && (b.dataset.search || "").indexOf(q) < 0) || !inKind;
+    });
     if (state.tab === "el") for (var z = 1; z <= 118; z++) elButtons[z].classList.toggle("dimmed", !!q && (ELEMENTS[z].n + " " + ELEMENTS[z].s).toLowerCase().indexOf(q) < 0);
   }
   function runDemo(d) {
     pushUndo();
+    LabUI.reset();
     Sim.ambient = 293.15; Sim.atmosphere = "air"; $("atm").value = "air"; state.syncAmb();
     Scenes.demo(d);
     state.demo = d;
@@ -183,7 +206,7 @@ function startElemental() {
     if (elButtons[state.mat]) elButtons[state.mat].setAttribute("aria-pressed", "false");
     state.mat = id;
     if (elButtons[id]) elButtons[id].setAttribute("aria-pressed", "true");
-    setTool("place");
+    if (state.tool !== "vessel") setTool("place");   // with the Beaker tool, picking a material chooses what Fill pours in
     showCard(id);
     showPartners(id);
     noteRecent(id);
@@ -247,6 +270,7 @@ function startElemental() {
     }
     $("facts").innerHTML = html;
     state.cardId = id;
+    syncFavButton();
     $("reactsWith").hidden = true;
   }
   // The full partner list costs thousands of lookups, so it is built when a material is chosen and not on hover.
@@ -268,12 +292,13 @@ function startElemental() {
     state.tool = t;
     TOOLS.forEach(function (o) { $("tool-" + o.id).setAttribute("aria-pressed", o.id === t ? "true" : "false"); });
     if (t !== "magnet") Sim.magnet = null;
+    if (typeof LabUI !== "undefined") LabUI.toolChanged();
   }
   function buildTools() {
     var box = $("tools");
     TOOLS.forEach(function (t, k) {
       var b = document.createElement("button");
-      b.id = "tool-" + t.id; b.textContent = t.label; b.title = t.tip + " (" + (k + 1) + ")";
+      b.id = "tool-" + t.id; b.textContent = t.label; b.title = t.tip + " (" + (t.key || k + 1) + ")";
       b.addEventListener("click", function () { setTool(t.id); });
       box.appendChild(b);
     });
@@ -300,6 +325,7 @@ function startElemental() {
     $("gridSize").onchange = function () {
       var d = this.value.split(",").map(Number), current = $("scene").value;
       state.undo.length = 0; state.redo.length = 0; refreshUndo();
+      LabUI.reset(); unpin();
       Sim.init(d[0], d[1], d[2]); Render.resizeGrid(); attachWorkers();
       if (current) loadScene(current); else Sim.updateCensus();
     };
@@ -339,10 +365,11 @@ function startElemental() {
     function setCompact(v) { document.body.classList.toggle("compact", v); press($("compact"), v); try { localStorage.setItem("elementalCompact", v ? "1" : ""); } catch (e) {} }
     $("compact").onclick = function () { setCompact(!document.body.classList.contains("compact")); };
     try { if (localStorage.getItem("elementalCompact")) setCompact(true); } catch (e) {}
-    $("clear").onclick = function () { pushUndo(); state.demo = null; Sim.clear(); Sim.updateCensus(); $("scene").value = ""; $("sceneNote").hidden = true; Render.markAllDirty(); };
+    $("clear").onclick = function () { pushUndo(); state.demo = null; LabUI.reset(); unpin(); Sim.clear(); Sim.updateCensus(); $("scene").value = ""; $("sceneNote").hidden = true; Render.markAllDirty(); };
     $("helpBtn").onclick = function () { $("help").hidden = false; };
     $("helpClose").onclick = function () { $("help").hidden = true; };
     $("help").addEventListener("click", function (e) { if (e.target === this) this.hidden = true; });
+    bindSettings();
     $("noteClose").onclick = function () { $("sceneNote").hidden = true; };
 
     var sel = $("scene");
@@ -357,14 +384,15 @@ function startElemental() {
       $("ptable").style.display = t === "el" ? "grid" : "none";
       $("compounds").style.display = t === "cp" ? "flex" : "none";
       $("reactions").style.display = t === "rx" ? "grid" : "none";
-      $("rxGroup").hidden = t !== "rx"; $("rxCount").hidden = t !== "rx";
+      $("rxGroup").hidden = t !== "rx"; $("rxCount").hidden = t !== "rx"; $("cpGroup").hidden = t !== "cp";
       filterLists();
       $("tableScroll").style.display = t === "hide" ? "none" : "block";
     }
     $("tabEl").onclick = function () { setTab("el"); };
     $("tabCp").onclick = function () { setTab("cp"); };
     $("tabRx").onclick = function () { setTab("rx"); };
-    $("search").oninput = filterLists; $("rxGroup").onchange = filterLists;
+    $("search").oninput = filterLists; $("rxGroup").onchange = filterLists; $("cpGroup").onchange = filterLists;
+    $("favBtn").onclick = function () { toggleFavourite(state.cardId); };
     $("tabHide").onclick = function () { setTab("hide"); };
     setTab("el");
 
@@ -396,25 +424,127 @@ function startElemental() {
       else if (e.key === "]") { size.value = Math.min(14, +size.value + 1); syncBrush(); }
       else if (e.key === "t" || e.key === "T") setTab(state.tab === "hide" ? "el" : "hide");
       else if (e.key === "h" || e.key === "H") toggleHeat();
-      else if (e.key === "Escape") $("help").hidden = true;
+      else if (e.key === "Escape") { $("help").hidden = true; $("settings").hidden = true; }
+      else if (e.key === "*") toggleFavourite(state.mat);
+      else if (e.key === "Home") { e.preventDefault(); Render.resetCamera(); }
+      else if (CAM_KEYS[e.key]) { e.preventDefault(); camHeld[e.key] = true; }
       else if (/^[1-9]$/.test(e.key)) setTool(TOOLS[+e.key - 1].id);
     });
+    window.addEventListener("keyup", function (e) { delete camHeld[e.key]; });
+    window.addEventListener("blur", function () { camHeld = {}; });
+  }
+
+  // ---- Camera keys ----
+  // Held keys turn, tilt and zoom at a steady rate. The view itself glides after the target, in render.js.
+  var CAM_KEYS = { ArrowLeft: [-1, 0, 0], ArrowRight: [1, 0, 0], ArrowUp: [0, -1, 0], ArrowDown: [0, 1, 0], "+": [0, 0, -1], "=": [0, 0, -1], "-": [0, 0, 1], "_": [0, 0, 1] }, camHeld = {};
+  function cameraKeys(dt) {
+    var c = Render.camera, turn = 0, tilt = 0, zoom = 0;
+    for (var k in camHeld) { var v = CAM_KEYS[k]; if (v) { turn += v[0]; tilt += v[1]; zoom += v[2]; } }
+    if (!turn && !tilt && !zoom) return;
+    c.yaw -= turn * 1.6 * dt;
+    c.pitch = clamp(c.pitch + tilt * 1.1 * dt, 0.02, 1.5);
+    c.dist = clamp(c.dist * Math.exp(zoom * 1.6 * dt), 18, Render.maxDist());
+  }
+  // Centre the view on whatever was double-clicked, keeping the same distance and angle.
+  function focusAt(nx, ny) {
+    var p = pick(nx, ny);
+    if (!p || !p.hit) return;
+    var c = Render.camera;
+    c.tx = p.x + 0.5; c.ty = p.y + 0.5; c.tz = p.z + 0.5;
+  }
+
+  // ---- Settings ----
+  function applyUiScale(v) { document.documentElement.style.setProperty("--ui-scale", v); }
+  // Holding a fixed render scale here also tells the main loop to stop adapting it.
+  function applyQuality() { var s = Settings.renderScale(); if (s !== null) Render.scale = s; }
+  function bindSettings() {
+    function sync() {
+      $("setQuality").value = Settings.get("quality");
+      $("setLook").value = Render.look === "classic" ? "classic" : "realistic";
+      $("setLook").disabled = !!document.getElementById("lookBtn") && document.getElementById("lookBtn").disabled;
+      $("setRoom").value = Settings.get("room");
+      $("setFx").value = Settings.get("effects") ? "on" : "off";
+      $("setScale").value = String(Settings.get("uiScale"));
+      $("setChamber").value = Settings.get("chamber");
+      $("setAuto").value = Settings.get("autosave") ? "on" : "off";
+      $("setFull").textContent = document.fullscreenElement ? "Leave full screen" : "Full screen";
+    }
+    $("settingsBtn").onclick = function () { sync(); $("settings").hidden = false; };
+    $("setClose").onclick = function () { $("settings").hidden = true; };
+    $("settings").addEventListener("click", function (e) { if (e.target === this) this.hidden = true; });
+    $("setFull").onclick = function () {
+      var done = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+      if (done && done.catch) done.catch(function () { toast("Full screen is not available here."); });
+    };
+    document.addEventListener("fullscreenchange", sync);
+    $("setQuality").onchange = function () { Settings.set("quality", this.value); };
+    $("setLook").onchange = function () { Render.setLook(this.value); };
+    $("setRoom").onchange = function () { Settings.set("room", this.value); };
+    $("setFx").onchange = function () { Settings.set("effects", this.value === "on"); };
+    $("setScale").onchange = function () { Settings.set("uiScale", +this.value); };
+    $("setChamber").onchange = function () { Settings.set("chamber", this.value); toast("The chamber size applies the next time the game starts."); };
+    $("setAuto").onchange = function () { Settings.set("autosave", this.value === "on"); if (this.value !== "on") Autosave.clear(); };
+    $("setReset").onclick = function () { Settings.reset(); Render.setLook("realistic"); sync(); };
+    Settings.onChange(function (k, v) { if (k === "uiScale") applyUiScale(v); if (k === "quality") applyQuality(); if (k === "room") { Render.room = v === "lab"; Render.wake(); } if (k === "effects") Effects.enabled = v; });
+    applyUiScale(Settings.get("uiScale"));
+    applyQuality();
+    Render.room = Settings.get("room") === "lab";
+    // Effects follow the setting, and start off for anyone whose system asks for less motion until they choose otherwise.
+    var lessMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var chosen = false;
+    try { chosen = localStorage.getItem("elemental.settings") !== null; } catch (e) { chosen = false; }
+    Effects.enabled = Settings.get("effects") && !(lessMotion && !chosen);
   }
 
   // ---- Undo and files ----
   function refreshUndo() { $("undo").disabled = !state.undo.length; $("redo").disabled = !state.redo.length; }
+  // The whole state of the chamber: cells, settings and equipment. Undo and save files both use this, so neither can lose part of it.
+  function captureWorld() {
+    var s = Sim.snapshot();
+    s.lab = Lab.serialize();
+    s.scene = $("scene").value;
+    return s;
+  }
+  function unpin() { state.pinned = null; state.pinnedSeries = []; if ($("graph-pin")) $("graph-pin").hidden = true; }
+  // Puts a captured or loaded state back, changing the chamber's size first if it has to. Afterward every control shows what the chamber now is.
+  function applyWorld(s) {
+    if (Sim.busy) Sim.idle();
+    if (s.W !== Sim.W || s.H !== Sim.H || s.D !== Sim.D) {
+      unpin();
+      Sim.init(s.W, s.H, s.D); Render.resizeGrid(); attachWorkers();
+    }
+    Sim.restore(s);
+    Lab.deserialize(s.lab);   // an older file has no equipment, and this empties the list
+    LabUI.forget();
+    syncControls(s);
+    state.demo = null;
+    Render.markAllDirty();
+  }
+  function syncControls(s) {
+    var size = s.W + "," + s.H + "," + s.D, grid = $("gridSize");
+    grid.value = size;
+    if (grid.value !== size) grid.selectedIndex = -1;   // a size the menu does not list
+    $("atm").value = Sim.atmosphere;
+    state.syncAmb(); state.syncDecay(); state.setGravity(Sim.gravity);
+    $("lid").setAttribute("aria-pressed", Sim.lid ? "true" : "false");
+    $("collapse").setAttribute("aria-pressed", Sim.structural ? "true" : "false");
+    $("fluidBtn").setAttribute("aria-pressed", Sim.fluid !== false ? "true" : "false");
+    var known = Scenes.list.some(function (o) { return o.id === s.scene; });
+    $("scene").value = known ? s.scene : "";
+    if (!known || s.scene !== state.noteScene) $("sceneNote").hidden = true;
+  }
   function pushUndo() {
-    state.undo.push(Sim.snapshot());
+    noteEdit();
+    state.undo.push(captureWorld());
     if (state.undo.length > 6) state.undo.shift();
     state.redo.length = 0;
     refreshUndo();
   }
   function undo(from, to) {
     if (!from.length) return;
-    to.push(Sim.snapshot());
-    Sim.restore(from.pop());
-    state.demo = null;
-    refreshUndo(); Render.markAllDirty();
+    to.push(captureWorld());
+    applyWorld(from.pop());
+    refreshUndo();
   }
   function toast(msg) {
     var el = $("toast");
@@ -422,40 +552,115 @@ function startElemental() {
     clearTimeout(state.toastT);
     state.toastT = setTimeout(function () { el.hidden = true; }, 3500);
   }
-  // Saved files hold a JSON header, then the raw arrays, gzipped. They are tied to this version's material list, and the header checks that.
+  var saveEnv = { Mat: Mat, WALL: WALL, labCheck: Lab.check };
+  function captureForFile() {
+    var s = captureWorld(), c = Render.camera;
+    s.camera = { yaw: c.yaw, pitch: c.pitch, dist: c.dist, tx: c.tx, ty: c.ty, tz: c.tz };
+    return s;
+  }
+  // The camera only comes back from a file. Undo leaves the view where the player put it.
+  function restoreCamera(c) { if (c) { Object.assign(Render.camera, c); Render.camera.dist = clamp(Render.camera.dist, 18, Render.maxDist()); Render.snapCamera(); } }
   async function saveFile() {
-    var snap = Sim.snapshot(), fields = Sim.snapshotFields, head = { format: "elemental-1", W: snap.W, H: snap.H, D: snap.D, ambient: snap.ambient, atmosphere: snap.atmosphere, lid: snap.lid, count: snap.count, tick: snap.tick };
-    var parts = [new TextEncoder().encode(JSON.stringify(head) + "\n")];
-    fields.forEach(function (f) { parts.push(new Uint8Array(snap[f].buffer, snap[f].byteOffset, snap[f].byteLength)); });
-    var gz = new Blob(parts).stream().pipeThrough(new CompressionStream("gzip"));
-    var blob = await new Response(gz).blob(), a = document.createElement("a");
+    var blob = await SaveFile.toBlob(captureForFile(), Mat), a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "chamber-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".elemental";
     a.click();
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
     toast("Saved " + (blob.size / 1048576).toFixed(1) + " MB");
   }
+  // Everything is checked and read into a separate copy before the chamber changes, so a bad file leaves the current one untouched.
   async function loadFile(file) {
     try {
-      var buf = new Uint8Array(await new Response(file.stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-      var nl = buf.indexOf(10), head = JSON.parse(new TextDecoder().decode(buf.subarray(0, nl)));
-      if (head.format !== "elemental-1") throw new Error("That is not a saved chamber.");
-      if (head.count !== Mat.count()) throw new Error("This file was saved by a different version, and its materials do not match.");
-      if (head.W !== Sim.W || head.H !== Sim.H || head.D !== Sim.D) {
-        Sim.init(head.W, head.H, head.D); Render.resizeGrid(); attachWorkers();
-        $("gridSize").value = head.W + "," + head.H + "," + head.D;
-      }
-      var off = nl + 1, snap = { ambient: head.ambient, atmosphere: head.atmosphere, lid: head.lid };
-      Sim.snapshotFields.forEach(function (f) {
-        var Type = Sim[f].constructor, bytes = Sim[f].length * Type.BYTES_PER_ELEMENT;
-        snap[f] = new Type(buf.slice(off, off + bytes).buffer); off += bytes;
-      });
+      var loaded = await SaveFile.fromBlob(file, saveEnv);
       pushUndo();
-      Sim.restore(snap);
-      $("atm").value = head.atmosphere; state.syncAmb(); $("lid").setAttribute("aria-pressed", head.lid ? "true" : "false");
-      $("scene").value = ""; $("sceneNote").hidden = true; state.demo = null; Render.markAllDirty();
-      toast("Loaded " + file.name);
-    } catch (e) { toast(e.message.indexOf("different version") >= 0 || e.message.indexOf("not a saved") >= 0 ? e.message : "That file could not be read."); }
+      applyWorld(loaded);
+      restoreCamera(loaded.camera);
+      toast("Loaded " + file.name + (loaded.repaired ? ", with " + loaded.repaired + " damaged readings reset" : ""));
+    } catch (e) { toast(e.friendly ? e.message : "That file could not be read."); }
+  }
+
+  // ---- Automatic save ----
+  // At most one save running at a time, and none while nothing has changed. A slow machine or a giant chamber saves less often rather than stuttering.
+  var AUTOSAVE_SECONDS = 60;
+  var auto = { busy: false, nextAt: 0, lastTick: -1, edits: 0, savedEdits: -1, offer: false, lastMs: 0 };
+  function noteEdit() { auto.edits++; if (auto.offer) dismissResume(); }
+  function autosaveNow(force) {
+    // A forced save waits its turn, because the one already running holds an older state.
+    if (auto.busy) return force ? auto.running.then(function () { return autosaveNow(true); }) : Promise.resolve(false);
+    if (!force) {
+      if (state.glLost || !Settings.get("autosave") || auto.offer) return Promise.resolve(false);
+      if (auto.lastTick === Sim.tickN && auto.savedEdits === auto.edits) return Promise.resolve(false);
+      if (!Sim.totalCells && !Lab.all().length) return Promise.resolve(false);
+    }
+    auto.busy = true;
+    var t0 = performance.now(), tick = Sim.tickN, edits = auto.edits, s = captureForFile();
+    auto.running = SaveFile.toBlob(s, Mat).then(function (blob) {
+      return Autosave.put(blob, { when: Date.now(), W: s.W, H: s.H, D: s.D, scene: s.scene });
+    }).then(function () {
+      auto.lastTick = tick; auto.savedEdits = edits; auto.lastMs = performance.now() - t0;
+      auto.busy = false;
+      return true;
+    }, function (e) { auto.busy = false; console.warn("Automatic save failed.", e); return false; });
+    return auto.running;
+  }
+  function autosaveTick(now) {
+    if (now < auto.nextAt) return;
+    auto.nextAt = now + Math.max(AUTOSAVE_SECONDS * 1000, auto.lastMs * 40);
+    if (now > 1000) autosaveNow(false);
+  }
+  function timeAgo(ms) {
+    var m = Math.round(ms / 60000);
+    if (m < 1) return "just now";
+    if (m < 60) return m + (m === 1 ? " minute ago" : " minutes ago");
+    var h = Math.round(m / 60);
+    if (h < 48) return h + (h === 1 ? " hour ago" : " hours ago");
+    return Math.round(h / 24) + " days ago";
+  }
+  async function resumeAutosave(record) {
+    var loaded = await SaveFile.fromBlob(record.blob, saveEnv);
+    applyWorld(loaded);
+    restoreCamera(loaded.camera);
+  }
+  function dismissResume() { auto.offer = false; $("resumeBar").hidden = true; }
+  // After a graphics reset the page reloads and carries on by itself. After a normal launch the player chooses, and starting to build counts as choosing not to.
+  async function offerResume() {
+    var marker = null;
+    try { marker = sessionStorage.getItem("elemental.resume"); sessionStorage.removeItem("elemental.resume"); } catch (e) { marker = null; }
+    var record = await Autosave.get();
+    if (!record || !record.blob) { if (marker) toast("The graphics driver restarted, and the chamber could not be recovered."); return; }
+    if (marker) {
+      try { await resumeAutosave(record); toast("The graphics driver restarted. Your chamber is back."); }
+      catch (e) { toast("The graphics driver restarted, and the chamber could not be recovered."); }
+      return;
+    }
+    if (!Settings.get("autosave") || location.hash.length > 1) return;
+    var i = record.info || {}, known = Scenes.list.filter(function (o) { return o.id === i.scene; })[0];
+    $("resumeText").textContent = "Continue your last chamber" + (known ? " (" + known.name + ")" : "") + ", saved " + timeAgo(Date.now() - (i.when || 0)) + "?";
+    $("resumeBar").hidden = false;
+    auto.offer = true;
+    $("resumeNo").onclick = dismissResume;
+    $("resumeGo").onclick = async function () {
+      dismissResume();
+      try { pushUndo(); await resumeAutosave(record); toast("Welcome back."); }
+      catch (e) { toast(e.friendly ? e.message : "The automatic save could not be read."); }
+    };
+  }
+
+  // ---- Lost graphics context ----
+  // A driver reset or a GPU crash takes every texture and shader with it. The simulation lives on the CPU and is fine, so it is saved first,
+  // and then the page reloads into a fresh context and carries on. Reloading rebuilds far less fragile state than recreating each GL object.
+  function bindContextLoss() {
+    canvas.addEventListener("webglcontextlost", function (e) {
+      e.preventDefault();   // without this the browser never offers the context back
+      state.glLost = true;
+      $("glLost").hidden = false; $("glLostText").textContent = "The graphics driver restarted. Saving your chamber and getting it back.";
+      var ready = autosaveNow(true).then(function (ok) { try { if (ok) sessionStorage.setItem("elemental.resume", "1"); } catch (err) { /* it simply starts fresh */ } return ok; });
+      state.glSaved = ready;
+      // Some drivers never give the context back. Offer a way out rather than leaving a black window.
+      setTimeout(function () { if (state.glLost) { $("glLostText").textContent = "The graphics driver has not come back yet. Your chamber is saved."; $("glLostReload").hidden = false; } }, 8000);
+    });
+    canvas.addEventListener("webglcontextrestored", function () { state.glSaved.then(function () { location.reload(); }); });
+    $("glLostReload").onclick = function () { state.glSaved.then(function () { location.reload(); }); };
   }
 
   // ---- Graphs: one small chart per reading, each with its own axis ----
@@ -621,25 +826,46 @@ function startElemental() {
     if (st.check && st.check({ state: state })) $("lessonNext").disabled = false;
   }
 
-  // ---- Recent materials ----
+  // ---- Favourite and recent materials ----
+  // Favourites stay in the bar for good, starred and first. Recent materials follow, up to eight that are not favourites already.
+  function favourites() { return Settings.get("favourites").filter(function (id) { return Mat.list[id] && id < Mat.count(); }); }
+  function toggleFavourite(id) {
+    if (!Mat.list[id]) return;
+    var f = favourites(), at = f.indexOf(id);
+    if (at >= 0) f.splice(at, 1); else if (f.length < 40) f.push(id);
+    Settings.set("favourites", f);
+    renderMaterialBar(); syncFavButton(); filterLists();
+    toast(at >= 0 ? "Removed from favourites" : "Added to favourites");
+  }
+  function syncFavButton() { var on = favourites().indexOf(state.cardId) >= 0; $("favBtn").setAttribute("aria-pressed", on ? "true" : "false"); $("favBtn").textContent = on ? "★" : "☆"; }
   function noteRecent(id) {
-    state.recent = [id].concat(state.recent.filter(function (x) { return x !== id; })).slice(0, 8);
-    var box = $("recent");
+    state.recent = [id].concat(state.recent.filter(function (x) { return x !== id; })).slice(0, 12);
+    renderMaterialBar();
+  }
+  function renderMaterialBar() {
+    var box = $("recent"), favs = favourites(), recent = state.recent.filter(function (m) { return favs.indexOf(m) < 0; }).slice(0, 8);
     box.innerHTML = "";
-    state.recent.forEach(function (m) {
+    function add(m, fav) {
       var b = document.createElement("button"), mm = Mat.list[m];
-      b.textContent = Mat.pretty(m >= FIRST_COMPOUND ? mm.formula : (mm.sym || mm.name.slice(0, 4)));
-      b.title = mm.name;
+      b.textContent = (fav ? "★ " : "") + Mat.pretty(m >= FIRST_COMPOUND ? mm.formula : (mm.sym || mm.name.slice(0, 4)));
+      b.title = mm.name + (fav ? " (favourite)" : "");
+      if (fav) b.className = "fav";
+      if (m === state.mat) b.setAttribute("aria-pressed", "true");
       b.onclick = function () { selectMat(m); };
       box.appendChild(b);
-    });
+    }
+    favs.forEach(function (m) { add(m, true); });
+    if (favs.length && recent.length) { var s = document.createElement("span"); s.className = "sep"; box.appendChild(s); }
+    recent.forEach(function (m) { add(m, false); });
   }
 
   function loadScene(id, keepNote) {
     if (Sim.history && Sim.history.length) pushUndo();
-    state.pinned = null; state.pinnedSeries = []; if ($("graph-pin")) $("graph-pin").hidden = true;
+    unpin();
     state.demo = null;
+    state.noteScene = id;
     Sim.ambient = 293.15; Sim.atmosphere = "air"; $("atm").value = "air"; state.setGravity(1);
+    if (typeof LabUI !== "undefined") LabUI.reset();
     var s = Scenes.load(id);
     state.syncAmb(); state.syncDecay();
     $("lid").setAttribute("aria-pressed", Sim.lid ? "true" : "false");
@@ -653,7 +879,9 @@ function startElemental() {
 
   // ---- Picking ----
   function pick(nx, ny) {
-    var ray = Render.ray(nx, ny), o = ray.o, d = ray.d, W = Sim.W, H = Sim.H, D = Sim.D;
+    var ray = Render.ray(nx, ny);
+    if (!ray) return null;   // no camera until the first frame is drawn
+    var o = ray.o, d = ray.d, W = Sim.W, H = Sim.H, D = Sim.D;
     var lo = [1, 1, 1], hi = [W - 1, H - 1, D - 1], t0 = -Infinity, t1 = Infinity;
     for (var a = 0; a < 3; a++) {
       var inv = 1 / (d[a] || 1e-9), ta = (lo[a] - o[a]) * inv, tb = (hi[a] - o[a]) * inv;
@@ -720,6 +948,7 @@ function startElemental() {
     canvas.addEventListener("pointerdown", function (e) {
       canvas.setPointerCapture(e.pointerId);
       if (e.button === 2 || e.button === 1 || state.tool === "orbit") { drag = { x: e.clientX, y: e.clientY, pan: e.button === 1 || e.shiftKey }; }
+      else if (e.button === 0 && state.tool === "vessel") { updatePointer(e); LabUI.down(e, pick(state.pointer.nx, state.pointer.ny), state.pointer); return; }
       else if (e.button === 0) { if (state.tool !== "magnet" && state.tool !== "neutron" && state.tool !== "uv") pushUndo(); state.painting = true; state.blastLock = false; }
       updatePointer(e);
     });
@@ -728,8 +957,9 @@ function startElemental() {
         var c = Render.camera, dx = e.clientX - drag.x, dy = e.clientY - drag.y;
         drag.x = e.clientX; drag.y = e.clientY;
         if (drag.pan) {
+          // Panning stays over the bench, so the view cannot wander off into the room and lose the chamber.
           var s = c.dist * 0.0016, sn = Math.sin(c.yaw), cs = Math.cos(c.yaw);
-          c.tx -= (dx * cs) * s; c.tz += (dx * sn) * s; c.ty = clamp(c.ty + dy * s, 0, Sim.H);
+          c.tx = clamp(c.tx - dx * cs * s, 1, Sim.W - 1); c.tz = clamp(c.tz + dx * sn * s, 1, Sim.D - 1); c.ty = clamp(c.ty + dy * s, 0, Sim.H);
         } else {
           c.yaw -= dx * 0.006;
           c.pitch = clamp(c.pitch + dy * 0.005, 0.02, 1.5);
@@ -737,16 +967,20 @@ function startElemental() {
         return;
       }
       updatePointer(e);
+      if (state.tool === "vessel" && state.pointer) LabUI.move(state.pointer);
     });
-    function up(e) { drag = null; state.painting = false; if (state.tool === "magnet") Sim.magnet = null; }
+    function up(e) { drag = null; if (typeof LabUI !== "undefined") LabUI.up(); state.painting = false; if (state.tool === "magnet") Sim.magnet = null; }
     canvas.addEventListener("pointerup", up);
     canvas.addEventListener("pointercancel", up);
     canvas.addEventListener("pointerleave", function () { state.pointer = null; Render.brush = null; });
     canvas.addEventListener("wheel", function (e) {
       e.preventDefault();
+      if (state.tool === "vessel" && LabUI.wheel(e)) return;
       var c = Render.camera;
-      c.dist = clamp(c.dist * Math.exp(e.deltaY * 0.001), 18, Math.max(Sim.W, Sim.D) * 4);
+      c.dist = clamp(c.dist * Math.exp(e.deltaY * 0.001), 18, Render.maxDist());
     }, { passive: false });
+    canvas.addEventListener("dblclick", function (e) { if (state.tool === "orbit" || state.tool === "vessel" || e.altKey) { updatePointer(e); focusAt(state.pointer.nx, state.pointer.ny); } });
+    canvas.addEventListener("auxclick", function (e) { if (e.button === 1 && e.detail === 2) { updatePointer(e); focusAt(state.pointer.nx, state.pointer.ny); } });
   }
   function updatePointer(e) {
     var r = canvas.getBoundingClientRect();
@@ -757,6 +991,7 @@ function startElemental() {
   var PHASES = ["solid", "powder", "liquid", "gas", "plasma"];
   function updateProbe(p) {
     var el = $("probe");
+    if (state.tool === "vessel" && LabUI.hover) { el.innerHTML = "<b>" + LabUI.hover.name + "</b><br>Drag to carry"; return; }   // the glass is WALL cells, which would read as the chamber's own wall
     if (!p || !p.hit) {
       var ai = p ? Sim.idx(clamp(p.ax, 1, Sim.W - 2), clamp(p.ay, 1, Sim.H - 2), clamp(p.az, 1, Sim.D - 2)) : -1;
       var airT = ai >= 0 ? Sim.T[ai] : Sim.ambient;
@@ -815,14 +1050,15 @@ function startElemental() {
     frames++; fpsT += dt;
     if (fpsT > 0.5) {
       Render.fpsNow = frames / fpsT; frames = 0; fpsT = 0;
-      // Drop the render resolution when the GPU falls behind, and bring it back when there is room.
-      if (Render.fpsNow < 22) { lowFrames++; highFrames = 0; if (lowFrames >= 2 && Render.scale > 0.4) { Render.scale = Math.max(0.4, Render.scale * 0.8); lowFrames = 0; } }
+      // Drop the render resolution when the GPU falls behind, and bring it back when there is room. A fixed quality setting turns this off.
+      if (Settings.renderScale() !== null) { lowFrames = highFrames = 0; }
+      else if (Render.fpsNow < 22) { lowFrames++; highFrames = 0; if (lowFrames >= 2 && Render.scale > 0.4) { Render.scale = Math.max(0.4, Render.scale * 0.8); lowFrames = 0; } }
       else if (Render.fpsNow > 52) { highFrames++; lowFrames = 0; if (highFrames >= 8 && Render.scale < 1) { Render.scale = Math.min(1, Render.scale * 1.15); highFrames = 0; } }
       else { lowFrames = highFrames = 0; }
     }
     if (Sim.tickPoll()) afterTick();
     var p = state.pointer ? pick(state.pointer.nx, state.pointer.ny) : null;
-    Render.brush = p && p.ax !== undefined ? brushPos(p) : null;
+    Render.brush = p && p.ax !== undefined && state.tool !== "vessel" ? brushPos(p) : null;
     if (Sim.busy) { /* the stroke catches up on the first frame with no tick running */ }
     else if (state.painting && state.pointer) {
       // Fill in the stroke between frames, so a fast drag leaves a line and not a row of dots.
@@ -850,7 +1086,11 @@ function startElemental() {
         }
       }
     }
-    Render.frame(now / 1000);
+    cameraKeys(dt);
+    Effects.update(state.paused ? 0 : dt);   // paused, effects hold still like everything else
+    if (!state.glLost) Render.frame(now / 1000);   // with no context to draw into, the simulation carries on and the screen waits
+    if (!state.glLost) LabUI.frame(dt);
+    autosaveTick(now);
     panelT += dt;
     if (panelT > 0.2) {
       panelT = 0; updatePanels(); updateProbe(p);
@@ -865,23 +1105,27 @@ function startElemental() {
     // The next tick starts last, so the frame above shaded a finished one and nothing reads a half-written chamber.
     if (!state.paused && Sim.threaded && !Sim.busy && acc >= 1) { Sim.tickStart(); acc -= 1; }
   }
-  function afterTick() { if (state.demo && state.demo.light) Scenes.demoTick(state.demo); }
+  // Lab equipment writes to the grid once per tick, between ticks, when no worker is writing.
+  function afterTick() { Lab.step(); if (state.demo && state.demo.light) Scenes.demoTick(state.demo); }
   function brushPos(p) {
     var r = state.brush + 0.5, h = state.tool === "place" ? state.height : 0;
     if (state.tool === "place") return { x: p.ax + 0.5, y: clamp(p.ay + h, 1, Sim.H - 2) + 0.5, z: p.az + 0.5, r: r };
     return { x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5, r: r };
   }
 
-  buildTools(); buildTable(); buildCompounds(); buildReactions(); buildGraphs(); buildLessons(); bindControls(); bindPointer(); markJournal();
+  LabUI.init({ canvas: canvas, pick: pick, state: state, setTool: setTool, pushUndo: pushUndo });
+  buildTools(); buildTable(); buildCompounds(); buildReactions(); buildGraphs(); buildLessons(); bindControls(); bindPointer(); bindContextLoss(); markJournal();
   $("dock").addEventListener("mouseleave", function () { if (state.cardId !== state.mat) { showCard(state.mat); showPartners(state.mat); } });
-  if (!Pool.available) { var hint = $("coreHint"); hint.hidden = false; }
+  // The hint is for pages opened without the launcher. An isolated page on a machine too small for helpers has nothing to fix.
+  if (!Pool.available && !self.crossOriginIsolated) { var hint = $("coreHint"); hint.hidden = false; }
   setTool("place"); selectMat(11);
   if (!openFromHash()) loadScene("alkali");
   window.addEventListener("hashchange", function () { Sim.idle(); openFromHash(); });
   setTimeout(function () { window.__ready = true; }, 0);
   document.getElementById("loading").hidden = true;
-  window.__elemental = { startLesson: startLesson, journal: journal, state: state, loadScene: loadScene, selectMat: selectMat, setTool: setTool, pick: pick, applyTool: applyTool };
+  window.__elemental = { startLesson: startLesson, journal: journal, state: state, loadScene: loadScene, selectMat: selectMat, setTool: setTool, pick: pick, applyTool: applyTool, autosaveNow: autosaveNow, auto: auto, undo: function () { undo(state.undo, state.redo); }, redo: function () { undo(state.redo, state.undo); } };
   requestAnimationFrame(loop);
+  offerResume();
 }
 // Compiling the raymarch shader can block for a few seconds on Windows, so let the page paint its loading message first.
 setTimeout(startElemental, 30);

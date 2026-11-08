@@ -58,7 +58,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     if (S.busy) S.idle();
     driverOwned = false;
     S.tickN = 0;   // a fresh chamber must not depend on how long the last one ran
-    W = S.W = w; H = S.H = h; D = S.D = d; WD = w * d; dx = 1; dz = w; dy = WD; N = WD * h;
+    W = S.W = w; H = S.H = h; D = S.D = d; WD = w * d; dx = 1; dz = w; dy = WD; N = WD * h; setFlameDirs();
     var A = Pool.alloc;
     ID = S.ID = A(Uint16Array, N); PH = S.PH = A(Uint8Array, N); T = S.T = A(Float32Array, N); PR = S.PR = A(Float32Array, N);
     AUX = S.AUX = A(Uint16Array, N); CH = S.CH = A(Uint8Array, N); STAMP = A(Uint8Array, N);
@@ -70,10 +70,11 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     cw = S.cw = Math.ceil(w / CHUNK); ch = S.ch = Math.ceil(h / CHUNK); cd = S.cd = Math.ceil(d / CHUNK);
     AWAKE = S.AWAKE = A(Int32Array, cw * ch * cd); DIRTY = S.DIRTY = A(Uint8Array, cw * ch * cd);
     px = S.px = A(Float32Array, MAX_PARTICLES); py = S.py = A(Float32Array, MAX_PARTICLES); pz = S.pz = A(Float32Array, MAX_PARTICLES);
-    pvx = A(Float32Array, MAX_PARTICLES); pvy = A(Float32Array, MAX_PARTICLES); pvz = A(Float32Array, MAX_PARTICLES);
+    pvx = S.pvx = A(Float32Array, MAX_PARTICLES); pvy = S.pvy = A(Float32Array, MAX_PARTICLES); pvz = S.pvz = A(Float32Array, MAX_PARTICLES);
     ptype = S.ptype = A(Uint8Array, MAX_PARTICLES); pmat = S.pmat = A(Uint16Array, MAX_PARTICLES); plife = A(Float32Array, MAX_PARTICLES);
     pT = A(Float32Array, MAX_PARTICLES); pphase = A(Uint8Array, MAX_PARTICLES);
     PC = A(Int32Array, 1); STATS = A(Int32Array, 8);
+    FX = S.FX = A(Int32Array, FX_SIZE * 4); FXH = S.FXH = A(Int32Array, 1);
     electrodes = [];
     S.clear();
     if (typeof Chem !== "undefined") { ChemL = Chem; Chem.bind(S); }
@@ -83,15 +84,16 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   // ---- Shared-memory plumbing ----
   S.sharedBuffers = function () {
     return { W: W, H: H, D: D, ID: ID, PH: PH, T: T, PR: PR, AUX: AUX, CH: CH, STAMP: STAMP, AWAKE: AWAKE, DIRTY: DIRTY, px: px, py: py, pz: pz, pvx: pvx, pvy: pvy, pvz: pvz,
-      ptype: ptype, pmat: pmat, plife: plife, pT: pT, pphase: pphase, PC: PC, STATS: STATS, P: P, VX: VX, VY: VY, VZ: VZ, USED: USED, AUX2: AUX2, U2: U2, FU: FU, FV: FV, FW: FW, FLAG: FLAG, FB: new Int32Array([FB]) };
+      ptype: ptype, pmat: pmat, plife: plife, pT: pT, pphase: pphase, PC: PC, STATS: STATS, P: P, VX: VX, VY: VY, VZ: VZ, USED: USED, AUX2: AUX2, U2: U2, FU: FU, FV: FV, FW: FW, FLAG: FLAG, FB: new Int32Array([FB]), FX: FX, FXH: FXH };
   };
   S.attachShared = function (b, index) {
-    W = S.W = b.W; H = S.H = b.H; D = S.D = b.D; WD = W * D; dx = 1; dz = W; dy = WD; N = WD * H;
+    W = S.W = b.W; H = S.H = b.H; D = S.D = b.D; WD = W * D; dx = 1; dz = W; dy = WD; N = WD * H; setFlameDirs();
     ID = S.ID = b.ID; PH = S.PH = b.PH; T = S.T = b.T; PR = S.PR = b.PR; AUX = S.AUX = b.AUX; CH = S.CH = b.CH; STAMP = b.STAMP;
     cw = S.cw = Math.ceil(W / CHUNK); ch = S.ch = Math.ceil(H / CHUNK); cd = S.cd = Math.ceil(D / CHUNK);
-    AWAKE = S.AWAKE = b.AWAKE; DIRTY = S.DIRTY = b.DIRTY; px = S.px = b.px; py = S.py = b.py; pz = S.pz = b.pz; pvx = b.pvx; pvy = b.pvy; pvz = b.pvz;
+    AWAKE = S.AWAKE = b.AWAKE; DIRTY = S.DIRTY = b.DIRTY; px = S.px = b.px; py = S.py = b.py; pz = S.pz = b.pz; pvx = S.pvx = b.pvx; pvy = S.pvy = b.pvy; pvz = S.pvz = b.pvz;
     ptype = S.ptype = b.ptype; pmat = S.pmat = b.pmat; plife = b.plife; pT = b.pT; pphase = b.pphase; PC = b.PC; STATS = b.STATS;
     P = S.P = b.P; VX = b.VX; VY = b.VY; VZ = b.VZ; USED = S.USED = b.USED; AUX2 = S.AUX2 = b.AUX2; U2 = S.U2 = b.U2;
+    FX = S.FX = b.FX; FXH = S.FXH = b.FXH;
     FU = b.FU; FV = b.FV; FW = b.FW; FLAG = b.FLAG; FB = b.FB[0]; fx = Math.ceil(W / FB); fy = Math.ceil(H / FB); fz = Math.ceil(D / FB);
     S.isWorker = true; rngState = (index * 2654435761) | 1;
     ChemL = Chem; Chem.bind(S); updateDecayTable();
@@ -104,6 +106,8 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     P[12] = S.decayScale; P[13] = S.tickN; P[14] = S.structural ? 1 : 0; P[15] = S.fluid === false ? 0 : 1;
     var oz = S.isotopeOverride ? Object.keys(S.isotopeOverride)[0] : 0;
     P[19] = S.enrichment === null ? -1 : S.enrichment; P[20] = oz ? +oz : 0; P[21] = oz ? S.isotopeOverride[oz] : 0;
+    var g = S.region;
+    P[22] = g ? 1 : 0; if (g) { P[23] = g.cx; P[24] = g.cz; P[25] = g.r; P[26] = g.y0; P[27] = g.y1; P[28] = g.kPa; }
   };
   var pending = null, pendingN = 0, lastFlush = 0;
   S.readParams = function (P) {
@@ -112,6 +116,10 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     S.star = P[8] === 1 ? { x: P[9], y: P[10], z: P[11] } : null;
     if (S.decayScale !== P[12]) { S.decayScale = P[12]; updateDecayTable(); }
     S.tickN = P[13]; S.structural = P[14] === 1; S.fluid = P[15] === 1;
+    if (P[22] === 1) {
+      var g = S.region || (S.region = {});
+      g.cx = P[23]; g.cz = P[24]; g.r = P[25]; g.y0 = P[26]; g.y1 = P[27]; g.kPa = P[28];
+    } else S.region = null;
     // Particles run on the sim thread, and a neutron can settle a cell's isotope, so that thread needs the same settings the main thread has.
     if (S.isDriver) {
       S.enrichment = P[19] < 0 ? null : P[19];
@@ -121,6 +129,16 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
       var now = Date.now();
       if (now - lastFlush > 200) { S.flushLog(Object.keys(pending).map(function (k) { return pending[k]; })); pending = null; pendingN = 0; lastFlush = now; }
     }
+  };
+  // ---- Reaction events, for the presentation layer ----
+  // A ring of recent events that effects (and later sound) can read: cell, kind, material, heat. Writing one changes nothing in the
+  // simulation and draws no random numbers, so runs with and without anyone reading them are identical. Every thread writes here.
+  var FX_SIZE = 2048, FX, FXH;
+  S.FX_SIZE = FX_SIZE;
+  S.FX_HEAT = 1; S.FX_FIZZ = 2; S.FX_GAS = 3; S.FX_PRECIPITATE = 4;
+  S.fx = function (i, kind, mat, heat) {
+    var o = (Atomics.add(FXH, 0, 1) & (FX_SIZE - 1)) * 4;
+    FX[o] = i; FX[o + 1] = kind; FX[o + 2] = mat; FX[o + 3] = heat | 0;
   };
   S.noteLost = function (mass) { STATS[5] += Math.round(mass * 1000); };
   S.lostMass = function () { return STATS[5] / 1000; };
@@ -337,6 +355,25 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     return bp > Mat.crit[id] ? Mat.crit[id] : bp;
   }
   S.boilingPoint = boilingPoint;
+  // A region of low pressure, such as the inside of a pumped-out bell jar: an upright cylinder (centre cx, cz, radius r, from y0 to y1)
+  // at kPa. Liquids in it boil at that pressure, and nothing in it burns or rusts once most of the air is gone. One region at a time;
+  // it reaches the worker threads through the shared parameters.
+  S.region = null;
+  function inRegion(i) {
+    var g = S.region, y = (i / WD) | 0;
+    if (y < g.y0 || y > g.y1) return false;
+    var r = i - y * WD, z = (r / W) | 0, x = r - z * W, ex = x + 0.5 - g.cx, ez = z + 0.5 - g.cz;
+    return ex * ex + ez * ez <= g.r * g.r;
+  }
+  S.inRegion = function (i) { return !!S.region && inRegion(i); };
+  // Boiling point at a pressure below one atmosphere, by Clausius-Clapeyron through the two points every material has: its normal boiling
+  // point and its boiling point at a hundredth of an atmosphere (bpVac).
+  function bpAt(id, kPa) {
+    var bp = Mat.bp[id], bv = Mat.bpVac[id];
+    if (kPa >= 101.3 || bv >= bp) return bp;
+    return 1 / (1 / bp + (1 / bv - 1 / bp) / 4.6 * Math.log(101.3 / (kPa < 0.1 ? 0.1 : kPa)));
+  }
+  S.bpAt = bpAt;
 
   function markStatic() { STATS[4] = 1; }
   S.markStatic = markStatic;
@@ -458,7 +495,9 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   function evaporate(i, x, y, z, id, t) {
     var up = i + dy, sat = saturation(id, t), have = AUX[up] ? USED[up] : 0;
     if (AUX[up] && AUX[up] !== id) return false;
-    var vac = S.atmosphere === "vacuum", amount = vac ? EVAP_RATE * 3 * sat : EVAP_RATE * (sat - have);
+    // In a pumped-out bell jar it evaporates as fast as into a vacuum, but the vapour stays in the air for the jar's pump to draw off.
+    var thin = S.region !== null && S.region.kPa < 30 && inRegion(i);
+    var vac = !thin && S.atmosphere === "vacuum", amount = vac || thin ? EVAP_RATE * 3 * sat : EVAP_RATE * (sat - have);
     if (amount < 1e-6) return false;
     // A part-used cell has less to give, but the chance of it going stays the same, or the leftovers would last too long.
     if (!vac) { AUX[up] = id; USED[up] = have + (id === WATER ? amount : amount * (1 - USED[i])); }
@@ -578,6 +617,7 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   // the plateaus of a real heating curve. Surplus carries over and a reversed transition refunds the bank, so energy is conserved.
   function phaseStep(i, id, ph, t) {
     var mp = Mat.mp[id], bp = boilingPoint(id, P[i]), pr = PR[i], L, g;
+    if (S.region !== null && inRegion(i)) { var low = bpAt(id, S.region.kPa); if (low < bp) bp = low; }
     if (mp > 0 && P[i] > 1) mp += Mat.dTm[id] * P[i];   // melting moves with pressure, down for anything that shrinks as it melts
     if (ph <= P_POWDER) {
       var top = Mat.sublimes[id] ? bp : mp;
@@ -653,15 +693,30 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   }
 
   // Evaporation or freezing pushes a dissolved salt back out as a grain beside the water.
+  // A water cell has gone, so what was dissolved in it stays in the water beside it, which gets stronger, as a drying solution does.
+  // Only with no water left that can hold it does it come out as a grain.
   function dropSolute(i) {
     var dirs = [-dy, dx, -dx, dz, -dz, dy], slots = [[AUX[i], USED[i]], [AUX2[i], U2[i]]];
     AUX[i] = 0; AUX2[i] = 0; USED[i] = 0; U2[i] = 0;
-    for (var q = 0; q < 2; q++) {
-      if (!slots[q][0]) continue;
+    next: for (var q = 0; q < 2; q++) {
+      var s = slots[q][0], used = slots[q][1], share = 1 - used;
+      if (!s) continue;
+      // Water beside it that already holds this solute takes what it has room for, so a strong solution spreads over several cells
+      // rather than crusting over the moment one surface cell dries.
+      for (var w = 0; w < 6; w++) {
+        var n = i + dirs[w], take;
+        if (ID[n] !== WATER || PH[n] !== P_LIQUID) continue;
+        if (AUX[n] === s) { take = USED[n] < share ? USED[n] : share; USED[n] -= take; share -= take; }
+        else if (AUX2[n] === s) { take = U2[n] < share ? U2[n] : share; U2[n] -= take; share -= take; }
+        else if (!AUX[n]) { AUX[n] = s; USED[n] = 1 - share; share = 0; }
+        else if (!AUX2[n]) { AUX2[n] = s; U2[n] = 1 - share; share = 0; }
+        if (share < 1e-6) continue next;
+      }
       for (var k = 0; k < 6; k++) {
         var j = i + dirs[k];
-        if (ID[j] === AIR) { setCell(j, slots[q][0], P_POWDER, T[i]); USED[j] = slots[q][1]; break; }
+        if (ID[j] === AIR) { setCell(j, s, P_POWDER, T[i]); USED[j] = 1 - share; continue next; }
       }
+      S.noteLost(share * Mat.n0[s] * Mat.list[s].M);
     }
   }
 
@@ -751,14 +806,20 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   }
 
   S.addElectrode = function (i) { if (electrodes.indexOf(i) < 0) electrodes.push(i); };
+  // electrodeGate, when set, says whether an electrode cell pulses on the shared clock. Equipment with its own switch, such as a
+  // power supply, returns false for its rods and pulses them itself through pulseCell, between ticks.
+  S.electrodeGate = null;
   function pulseElectrodes() {
     if (S.tickN % 6 !== 0) return;
+    var gate = S.electrodeGate;
     for (var k = 0; k < electrodes.length; k++) {
       var i = electrodes[k];
       if (ID[i] !== ELECTRODE) { electrodes.splice(k--, 1); continue; }
+      if (gate && !gate(i)) continue;
       CH[i] = CH_HEAD; wakeI(i);
     }
   }
+  S.pulseCell = function (i) { if (ID[i] === ELECTRODE) { CH[i] = CH_HEAD; wakeI(i); } };
 
   // ---- Radioactivity ----
   var BE = { 1: 0, 2: 7.07, 3: 5.33, 4: 6.46, 5: 6.93, 6: 7.68, 7: 7.48, 8: 7.98, 9: 7.78, 10: 8.03, 11: 8.11, 12: 8.26, 13: 8.33, 14: 8.45, 15: 8.48, 16: 8.49, 17: 8.52, 18: 8.52, 19: 8.58, 20: 8.55, 21: 8.62, 22: 8.72, 23: 8.74, 24: 8.78, 25: 8.77, 26: 8.79 };
@@ -1025,6 +1086,14 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     if (id === FLAME) {
       T[i] = t * 0.945;
       if (T[i] < 900 || rf() < 0.02) { ID[i] = AIR; PH[i] = P_GAS; AUX[i] = 0; wake(x, y, z); return true; }
+      // A flame test: a flame that touches a flame-test metal, as the element, one of its compounds or dissolved in water, takes on its colour.
+      // The metal's atoms rise with the hot gas, so flame also takes the colour of coloured flame just below it. Never from above or the side,
+      // or a colour could feed itself and outlast the metal that gave it.
+      if (!FLAME_TEST[AUX[i]]) {
+        var below = i - dy, step = FLAME_DIRS[rnd() % 6], nb = ID[i + step] === FLAME ? i + 2 * step : i + step;   // through one flame cell to what lies past it
+        var fz = ID[below] === FLAME && FLAME_TEST[AUX[below]] ? AUX[below] : (nb > 0 && nb < N ? flameMetal(nb) : 0);
+        if (fz) AUX[i] = fz;
+      }
       if (STAMP[i] !== stamp) { moveFlame(i, x, y, z); }
       return true;
     }
@@ -1056,6 +1125,18 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     return busy;
   }
 
+  // Metals whose atoms colour a flame strongly: the alkali and alkaline earth metals, copper, boron, indium and thallium.
+  var FLAME_TEST = new Uint8Array(119), FLAME_DIRS = [0, 0, 0, 0, 0, 0];
+  [3, 11, 19, 37, 55, 20, 38, 56, 29, 5, 49, 81].forEach(function (z) { FLAME_TEST[z] = 1; });
+  function flameMetal(n) {
+    var nid = ID[n];
+    if (nid === AIR || nid === FLAME || nid === WALL || nid === ELECTRODE) return 0;
+    if (nid === WATER && PH[n] === P_LIQUID) nid = AUX[n] || AUX2[n];
+    if (nid <= 118) return FLAME_TEST[nid] ? nid : 0;
+    var m = Mat.list[nid];
+    return m && m.catZ && FLAME_TEST[m.catZ] ? m.catZ : 0;
+  }
+  function setFlameDirs() { FLAME_DIRS[0] = dx; FLAME_DIRS[1] = -dx; FLAME_DIRS[2] = dz; FLAME_DIRS[3] = -dz; FLAME_DIRS[4] = dy; FLAME_DIRS[5] = -dy; }
   function moveFlame(i, x, y, z) {
     var r = rf(), j, nx = x, ny = y, nz = z;
     if (r < 0.7) { j = i + dy; ny++; } else { var o = rnd() & 3; nx += DIR_X[o]; nz += DIR_Z[o]; j = i + DIR_X[o] + DIR_Z[o] * dz; }
@@ -1570,6 +1651,8 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
   S.snapshot = function () {
     if (S.busy) S.idle();
     var out = { W: W, H: H, D: D, tick: S.tickN, ambient: S.ambient, atmosphere: S.atmosphere, lid: S.lid, count: Mat.count() };
+    // Everything else that changes how the chamber behaves, so that going back to a snapshot brings all of it back.
+    out.world = { gravity: S.gravity, decayScale: S.decayScale, star: S.star ? { x: S.star.x, y: S.star.y, z: S.star.z } : null, structural: !!S.structural, fluid: S.fluid !== false, enrichment: S.enrichment, isotopeOverride: S.isotopeOverride };
     SNAP.forEach(function (name) { out[name] = S[name].slice(); });
     return out;
   };
@@ -1580,6 +1663,13 @@ var Sim = (function (Math, Atomics, Mat, ELEMENTS, MAX_MATERIALS, AIR, FLAME, WA
     electrodes = [];
     for (var i = 0; i < N; i++) if (ID[i] === ELECTRODE) electrodes.push(i);
     S.ambient = snap.ambient; S.atmosphere = snap.atmosphere; S.lid = snap.lid;
+    var w = snap.world;
+    if (w) {
+      S.gravity = w.gravity; S.star = w.star ? { x: w.star.x, y: w.star.y, z: w.star.z } : null; S.structural = w.structural; S.fluid = w.fluid;
+      S.enrichment = w.enrichment; S.isotopeOverride = w.isotopeOverride;
+      if (w.decayScale !== S.decayScale) S.setDecayScale(w.decayScale);
+      if (!S.fluid) { FU.fill(0); FV.fill(0); FW.fill(0); }
+    }
     S.wakeAll(); STATS[4] = 1; STATS[7] = 1;
     S.updateCensus();
   };

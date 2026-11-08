@@ -34,7 +34,7 @@ var ELEMENT_EXTRA = {
 26:["#8c8c88","#ffc060",-0.44,1200,10,0,1043,2.56,"Magnetic below 1043 K. Rusts where water and air meet. Its nucleus is the most tightly bound in fusion's reach, so stars end here."],
 27:["#a0a4ac","#ffe0a0",-0.28,1350,17.2,0,1388,37.2,"Keeps its magnetism up to 1388 K, the highest Curie point of any element."],
 28:["#b8b4a0","#ffe0a0",-0.26,1400,14.3,0,627,4.49,"Magnetic up to 627 K. Its salts are green. Resists corrosion and plates other metals."],
-29:["#c87850","#30ffb0",0.34,1400,59.6,0,0,3.78,"Second-best conductor. Too noble for most acids, but nitric acid dissolves it. Burns blue-green."],
+29:["#c87850","#30ffb0",0.34,1000,59.6,0,0,3.78,"Second-best conductor. Too noble for most acids, but nitric acid dissolves it. Burns blue-green."],
 30:["#a8b0b8","#b0ffe0",-0.76,1072,16.9,0.85,0,1.11,"Sacrificial metal: it corrodes to protect iron and displaces copper from solution."],
 31:["#c0c8d0","#c0b0ff",-0.53,800,7.1,1.08,0,2.75,"Melts at 30 C, in your hand. Expands when it freezes, and the liquid makes aluminium crumble."],
 32:["#90989c","#ffe0a0",0.12,1200,0.002,0,0,2.2,"Semiconductor that launched the transistor. Expands on freezing like silicon."],

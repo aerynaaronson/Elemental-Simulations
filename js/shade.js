@@ -36,7 +36,7 @@ var Shade = (function (Mat, ELEMENTS, AIR, FLAME, WALL, ELECTRODE, P_POWDER, P_L
 
   // Rebuild colour and emission for one chunk.
   function shadeChunk(cx, cy, cz, time) {
-    var ID = Sim.ID, PH = Sim.PH, T = Sim.T, AUX = Sim.AUX, AUX2 = Sim.AUX2, USED = Sim.USED, CH = Sim.CH, CS = Sim.CHUNK, Mat_ = Mat;
+    var ID = Sim.ID, PH = Sim.PH, T = Sim.T, AUX = Sim.AUX, AUX2 = Sim.AUX2, USED = Sim.USED, U2 = Sim.U2, CH = Sim.CH, CS = Sim.CHUNK, Mat_ = Mat;
     var x0 = cx * CS, x1 = Math.min(W, x0 + CS), y0 = cy * CS, y1 = Math.min(H, y0 + CS), z0 = cz * CS, z1 = Math.min(D, z0 + CS);
     var heat = S.heat, phView = S.phView;
     for (var y = y0; y < y1; y++) for (var z = z0; z < z1; z++) {
@@ -69,16 +69,23 @@ var Shade = (function (Mat, ELEMENTS, AIR, FLAME, WALL, ELECTRODE, P_POWDER, P_L
           var mt = id <= 118 && ELEMENTS[id].sigma > 0.3;
           a = mt ? 255 : (id === WATER_ID ? 13 : 120);
           spec = mt ? 240 : 120;
-          if (AUX[i]) {
-            // Stronger solutions show deeper colour. A mixed cell blends its two solutes.
-            var so = Mat_.list[AUX[i]], conc = 1 - USED[i];
-            if (so && so.solutionCol) {
-              var mixC = conc > 0.25 ? 1 : conc * 4;
-              r += (so.solutionCol[0] - r) * mixC; g += (so.solutionCol[1] - g) * mixC; b += (so.solutionCol[2] - b) * mixC; a = 13 + 24 * conc;
+          if (id === WATER_ID && (AUX[i] || AUX2[i])) {
+            // Stronger solutions show deeper colour, by molarity as the eye sees it: a tenth-molar solution is tinted and a molar one is strong.
+            // (A cell's full share of a salt is 10 to 25 M, far past what water can hold, so going by share left real solutions almost clear.)
+            // A mixed cell blends its two solutes by how strongly each absorbs, its molarity over its half-strength molarity, so a trace of
+            // blood-red thiocyanate complex shows through half-molar iron(III). Only water holds solutes; in an element cell AUX2 is a mass number.
+            var cr = 0, cg = 0, cb = 0, absorb = 0;
+            for (var q = 0; q < 2; q++) {
+              var sid = q ? AUX2[i] : AUX[i];
+              if (!sid) continue;
+              var so = Mat_.list[sid], mol = (1 - (q ? U2[i] : USED[i])) * Mat_.n0[sid] * 1000, A = mol > 0 ? mol / (so && so.tintM ? so.tintM : 0.3) : 0;
+              if (so && so.solutionCol) { cr += so.solutionCol[0] * A; cg += so.solutionCol[1] * A; cb += so.solutionCol[2] * A; absorb += A; }
+              else a += (so && so.acid ? 14 : 4) * (A / (A + 1)) * (q ? 0.5 : 1);
             }
-            else if (so && so.acid) { a = 13 + 14 * conc; }
-            else a = 13 + 4 * conc;
-            if (AUX2[i]) { var s2 = Mat_.list[AUX2[i]]; if (s2 && s2.solutionCol) { r = (r + s2.solutionCol[0]) / 2; g = (g + s2.solutionCol[1]) / 2; b = (b + s2.solutionCol[2]) / 2; a += 8; } }
+            if (absorb > 0) {
+              var st = absorb / (absorb + 1), mixC = st * 1.5 > 1 ? 1 : st * 1.5;
+              r += (cr / absorb - r) * mixC; g += (cg / absorb - g) * mixC; b += (cb / absorb - b) * mixC; a += 24 * st;
+            }
           }
         } else {
           r = Mat_.colG[m3]; g = Mat_.colG[m3 + 1]; b = Mat_.colG[m3 + 2];
@@ -93,7 +100,8 @@ var Shade = (function (Mat, ELEMENTS, AIR, FLAME, WALL, ELECTRODE, P_POWDER, P_L
             var other = AUX[i] === ind ? AUX2[i] : AUX[i], oU = AUX[i] === ind ? Sim.U2[i] : USED[i], cellPH = Chem.pHfromSolutes(other, other ? Chem.molar(other, oU) : 0, 0, 0);
             if (phView || ind === UNIVERSAL) { var pc = phColor(cellPH); r = pc[0]; g = pc[1]; b = pc[2]; a = phView ? 60 : 40; }
             else if (ind === LITMUS) { if (cellPH < 4.5) { r = 210; g = 40; b = 50; } else if (cellPH > 8.3) { r = 40; g = 70; b = 200; } else { r = 120; g = 70; b = 140; } a = 40; }
-            else if (ind === PHENOL) { if (cellPH > 8.2) { r = 235; g = 40; b = 150; a = 50; } else a = 14; }
+            // Water here only absorbs light, so a dye in deep water just goes dark. A real dye also scatters light back at the eye, and a soft glow stands in for that.
+            else if (ind === PHENOL) { if (cellPH > 8.2) { r = 255; g = 60; b = 150; a = 45; er = 190; eg = 38; eb = 110; } else a = 14; }
           }
         } else if (phView && ph === P_LIQUID && id > 118 && Mat_.list[id].acid) {
           var acidC = phColor(Chem.pHfromSolutes(id, Chem.molar(id, USED[i]), 0, 0)); r = acidC[0]; g = acidC[1]; b = acidC[2]; a = 90;
@@ -212,5 +220,12 @@ var Shade = (function (Mat, ELEMENTS, AIR, FLAME, WALL, ELECTRODE, P_POWDER, P_L
     shadeChunk(cx, cy, cz, S.time);
     coarseChunk(cx, cy, cz);
   };
+  // Rebuild only the coarse volume of one chunk, after something other than the shader has written voxels into it.
+  S.coarseByIndex = function (k) {
+    var cw = Sim.cw, cd = Sim.cd, cy = (k / (cw * cd)) | 0, r = k - cy * cw * cd, cz = (r / cw) | 0, cx = r - cz * cw;
+    coarseChunk(cx, cy, cz);
+  };
+  S.CLASS = { STATIC: C_STATIC, POWDER: C_POWDER, OPAQUE_LIQUID: C_OPAQUE_LIQUID, CLEAR_LIQUID: C_CLEAR_LIQUID, GLASS: C_GLASS };
+  S.WATER_ID = WATER_ID;
   return S;
 })(Mat, ELEMENTS, AIR, FLAME, WALL, ELECTRODE, P_POWDER, P_LIQUID, P_GAS, P_PLASMA);

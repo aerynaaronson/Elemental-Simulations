@@ -112,6 +112,10 @@ body.compact .el i, body.compact .el u { display: none; }
 body.compact .el b { font-size: 10.5px; }
 body.compact #keyRow { display: none; }
 #recent button { padding: 2px 7px; font: 600 12px var(--mono); }
+#recent button.fav { border-color: #c9a54a; color: #f1d27a; }
+#recent .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 2px; }
+#favBtn { margin-left: auto; align-self: flex-start; padding: 1px 7px; font-size: 15px; line-height: 1.2; color: var(--dim); }
+#favBtn[aria-pressed=true] { color: #f1d27a; border-color: #c9a54a; }
 .graph { position: relative; margin-bottom: 8px; }
 .graph .gh { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); }
 .graph .gh b { font: 500 12px var(--mono); color: var(--fg); }
@@ -143,6 +147,37 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
   #side { width: 100%; border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
   #legend { display: none; }
 }
+#labOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+#labPanel { position: absolute; right: 10px; bottom: 10px; width: 250px; padding: 8px 11px; background: rgba(13,16,22,.88); border: 1px solid var(--line); border-radius: 5px; font: 12px var(--sans); color: var(--fg); }
+#labPanel h3 { margin: 0 0 6px; font-size: 13px; }
+#labPanel p { margin: 0 0 6px; color: var(--dim); line-height: 1.4; }
+#labPanel .lbar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+#labPanel .lbar div { height: 100%; background: var(--cold); }
+#labPanel .lline { font: 11px var(--mono); color: var(--dim); margin: 3px 0; }
+#labPanel .lline.dim { color: var(--faint); }
+#labPanel .lcontents { font: 11px var(--mono); margin: 4px 0; max-height: 90px; overflow: auto; }
+#labPanel .lcontents span { color: var(--faint); float: right; }
+#labPanel .lcontents .empty { color: var(--faint); }
+#labPanel input[type=range] { width: 100%; }
+#labPanel .lbtns { display: flex; gap: 4px; margin-top: 5px; }
+#labPanel .lbtns button { flex: 1; font-size: 11px; padding: 3px 4px; }
+#labPanel .lbtns button[aria-pressed=true] { background: var(--accent); color: #111; }
+#labPanel .lbtns.wrap { flex-wrap: wrap; }
+#labPanel .lbtns.wrap button { flex: 1 1 30%; }
+/* Panels scale with the setting; the chamber view does not, so picking and drawing stay in step with the pointer. */
+#top, #side, #dock, #help > div, #settings > div, #labPanel, #sceneNote, #lessonBox, #lessonMenu { zoom: var(--ui-scale, 1); }
+#settings { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: center; justify-content: center; z-index: 30; }
+#settings[hidden] { display: none; }
+#settings > div { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px 20px; width: min(440px, 92vw); max-height: 88vh; overflow: auto; color: var(--fg); font: 13px var(--sans); }
+#settings h2 { margin: 0 0 10px; font-size: 16px; }
+#settings .srow { display: grid; grid-template-columns: 1fr 190px; align-items: center; gap: 10px; margin: 8px 0; }
+#settings .srow select, #settings .srow button { width: 100%; }
+#settings .shint { color: var(--dim); font-size: 12px; line-height: 1.4; margin: 2px 0 10px; }
+#settings .sfoot { display: flex; gap: 6px; justify-content: flex-end; margin-top: 14px; }
+#resumeBar { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); width: max-content; max-width: 56%; padding: 7px 10px; display: flex; gap: 8px; align-items: center; background: rgba(13,16,22,.92); border: 1px solid var(--line); border-radius: 5px; font: 12px var(--sans); color: var(--fg); z-index: 5; }
+#resumeBar[hidden] { display: none; }
+#glLost { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; background: rgba(8,10,14,.92); color: var(--fg); font: 14px var(--sans); text-align: center; z-index: 6; padding: 20px; }
+#glLost[hidden] { display: none; }
 </style>
 
 <div id="top">
@@ -166,6 +201,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
     <button id="share" title="Copy a link to this experiment or reaction">Share</button>
     <button id="lessonsBtn">Lessons</button>
     <button id="helpBtn">Guide</button>
+    <button id="settingsBtn">Settings</button>
   </div>
   <div id="stats"></div>
   <div id="coreHint" hidden>Using one CPU core. Open with Start Elemental.bat to use them all.</div>
@@ -176,6 +212,8 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
     <canvas id="view" aria-label="3D simulation chamber"></canvas>
     <div id="loading">Preparing the chamber</div>
     <div id="noGL">This simulation needs WebGL2. Turn on hardware acceleration in your browser settings, then reload.</div>
+    <div id="glLost" hidden><div id="glLostText">The graphics driver restarted. Saving your chamber and getting it back.</div><button id="glLostReload" hidden>Reload now</button></div>
+    <div id="resumeBar" hidden><span id="resumeText"></span><button id="resumeGo">Continue</button><button id="resumeNo">Dismiss</button></div>
     <div id="sceneNote"><button id="noteClose" aria-label="Hide note">×</button><h2 id="noteTitle"></h2><p id="noteText"></p><button id="noteAction" hidden></button></div>
     <div id="legend">
       <div><span style="color:#73f2ff">●</span> neutron</div><div><span style="color:#ffbf4d">●</span> alpha</div><div><span style="color:#66bfff">●</span> beta</div><div><span style="color:#d9ffa6">●</span> gamma</div>
@@ -187,7 +225,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
   </div>
   <aside id="side">
     <section id="card" aria-live="polite">
-      <div class="head"><div id="swatch"></div><div><div class="sym" id="cSym"></div></div><div><div class="name" id="cName"></div><div class="sub" id="cSub"></div></div></div>
+      <div class="head"><div id="swatch"></div><div><div class="sym" id="cSym"></div></div><div><div class="name" id="cName"></div><div class="sub" id="cSub"></div></div><button id="favBtn" aria-pressed="false" title="Favourite: keep this material in the bar below (*)">☆</button></div>
       <dl id="facts"></dl>
       <p id="note"></p>
       <details id="reactsWith" hidden></details>
@@ -249,6 +287,9 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
     <div id="recent" class="group" aria-label="Recent materials"></div>
     <input id="search" type="search" placeholder="Search" aria-label="Search elements, compounds and reactions">
     <select id="rxGroup" aria-label="Reaction group" hidden></select>
+    <select id="cpGroup" aria-label="Kind of compound" hidden>
+      <option value="">All compounds</option><option value="acid">Acids</option><option value="base">Bases</option><option value="salt">Salts</option><option value="oxide">Oxides</option><option value="organic">Organic</option><option value="alloy">Alloys</option><option value="gas">Gases at 20 °C</option><option value="liquid">Liquids at 20 °C</option><option value="fav">Favourites</option>
+    </select>
     <span id="rxCount" class="mono" hidden></span>
     <div class="group"><label for="filter">Highlight</label>
       <select id="filter">
@@ -272,9 +313,21 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
     <ul>
       <li><b>Left drag:</b> use the current tool. <b>Right drag:</b> orbit. <b>Middle drag</b> or <kbd>Shift</kbd> + right drag: pan. <b>Wheel:</b> zoom.</li>
       <li><kbd>Ctrl</kbd>+<kbd>Z</kbd> undo, <kbd>Ctrl</kbd>+<kbd>Y</kbd> redo. <kbd>P</kbd> pins the cell under the cursor and graphs its temperature.</li>
+      <li><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> turn the view, <kbd>+</kbd> <kbd>−</kbd> zoom, <kbd>Home</kbd> resets it. <b>Middle double-click</b>, or <kbd>Alt</kbd> + double-click, centres the view on what is under the pointer.</li>
+      <li><kbd>*</kbd> or the star on the data card keeps a material in the bar under the chamber. The Compounds tab can be narrowed to acids, salts, organics and more.</li>
       <li><kbd>[</kbd> <kbd>]</kbd> brush size. <kbd>1</kbd>–<kbd>9</kbd> tools. <kbd>Space</kbd> pause. <kbd>T</kbd> hide the table. <kbd>H</kbd> heat view.</li>
       <li><b>Height</b> sets how far above the surface you pour. Set it to 0 to paint directly on surfaces.</li>
       <li><b>Place at</b> sets the starting temperature, so you can pour liquid nitrogen at 70 K or molten iron at 2000 K.</li>
+    </ul>
+    <h3>Lab equipment</h3>
+    <ul>
+      <li>Press <kbd>B</kbd> or choose <b>Lab</b>. Pick a container, a hot plate or a chiller in the panel, then click a surface to set it down.</li>
+      <li>Drag to carry. <b>Wheel</b> tips a carried container so it pours; <kbd>Shift</kbd> + wheel lifts it. <kbd>Q</kbd> and <kbd>E</kbd> turn the spout. <kbd>F</kbd> fills it with the selected material.</li>
+      <li>A container that sits still becomes real glass in the chamber, and what is inside it reacts, heats and boils like anything else.</li>
+    </ul>
+    <h3>Saving</h3>
+    <ul>
+      <li><b>Save</b> and <b>Load</b> use files, including your equipment. The game also keeps an automatic save of the current chamber and offers it the next time you start. <b>Settings</b> can turn that off.</li>
     </ul>
     <h3>What is real</h3>
     <ul>
@@ -301,6 +354,24 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
   </div>
 </div>
 
+<div id="settings" hidden>
+  <div role="dialog" aria-label="Settings">
+    <h2>Settings</h2>
+    <div class="srow"><label for="setFull">Display</label><button id="setFull">Full screen</button></div>
+    <div class="srow"><label for="setQuality">Render quality</label><select id="setQuality"><option value="auto">Automatic</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div>
+    <div class="shint">Automatic lowers the resolution when the frame rate drops and raises it again when there is room.</div>
+    <div class="srow"><label for="setLook">Look</label><select id="setLook"><option value="realistic">Realistic</option><option value="classic">Classic voxels</option></select></div>
+    <div class="srow"><label for="setRoom">Surroundings</label><select id="setRoom"><option value="lab">Laboratory</option><option value="plain">Plain backdrop</option></select></div>
+    <div class="srow"><label for="setFx">Reaction effects</label><select id="setFx"><option value="on">On</option><option value="off">Off</option></select></div>
+    <div class="shint">Flashes, fizz and wisps that show where reactions happen. Turn them off to reduce flashing.</div>
+    <div class="srow"><label for="setScale">Interface size</label><select id="setScale"><option value="0.85">Small</option><option value="1">Normal</option><option value="1.15">Large</option><option value="1.3">Larger</option><option value="1.5">Largest</option></select></div>
+    <div class="srow"><label for="setChamber">Chamber at launch</label><select id="setChamber"><option value="auto">Fit this computer</option><option value="64,48,64">Small</option><option value="96,64,96">Medium</option><option value="128,80,128">Large</option><option value="160,96,160">Huge</option><option value="224,128,224">Giant</option></select></div>
+    <div class="srow"><label for="setAuto">Automatic save</label><select id="setAuto"><option value="on">On</option><option value="off">Off</option></select></div>
+    <div class="shint">Keeps one copy of the current chamber, updated about once a minute.</div>
+    <div class="sfoot"><button id="setReset">Reset to defaults</button><button id="setClose">Close</button></div>
+  </div>
+</div>
+
 <script src="js/elements.data.js"></script>
 <script src="js/elements.js"></script>
 <script src="js/isotopes.data.js"></script>
@@ -311,6 +382,16 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-bottom-width
 <script src="js/sim.js"></script>
 <script src="js/chem.js"></script>
 <script src="js/shade.js"></script>
+<script src="js/effects.js"></script>
 <script src="js/render.js"></script>
 <script src="js/scenes.js"></script>
+<script src="js/savefile.js"></script>
+<script src="js/autosave.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/vessels.js"></script>
+<script src="js/lab.js"></script>
+<script src="js/labware.data.js"></script>
+<script src="js/lab-meshes.js"></script>
+<script src="js/lab-render.js"></script>
+<script src="js/lab-ui.js"></script>
 <script src="js/ui.js"></script>

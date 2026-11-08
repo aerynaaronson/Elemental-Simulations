@@ -4,8 +4,41 @@
     {
       "name": "elemental",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["tools/serve.py", "8766"],
+      "runtimeArgs": [
+        "tools/serve.py",
+        "8766"
+      ],
       "port": 8766
+    },
+    {
+      "name": "elemental-alt",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "tools/serve.py",
+        "8771"
+      ],
+      "port": 8771,
+      "autoPort": false
+    },
+    {
+      "name": "elemental-alt2",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "tools/serve.py",
+        "8772"
+      ],
+      "port": 8772,
+      "autoPort": false
+    },
+    {
+      "name": "elemental-alt3",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "tools/serve.py",
+        "8773"
+      ],
+      "port": 8773,
+      "autoPort": false
     }
   ]
 }

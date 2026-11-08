@@ -16,30 +16,114 @@ var Scenes = (function () {
     Sim.box(a, 1, b, a, top, d, WALL, P_STATIC); Sim.box(c, 1, b, c, top, d, WALL, P_STATIC);
   }
 
+  // ---- Lab equipment in experiments ----
+  // Sizes are given in cells of the 64-cell chamber and grow with the chamber, so an experiment looks the same at any size.
+  function cells(n) { return Math.max(1, Math.round(n * Math.min(W, D) / 64)); }
+  // A number of drops, which grows with the volume of what they go into. A dropper holds 1000 at most.
+  function drops(n) { var k = Math.min(W, D) / 64; return Math.min(1000, Math.max(1, Math.round(n * k * k * k))); }
+  function hasLab() { return typeof Lab !== "undefined" && typeof Vessels !== "undefined"; }
+
+  // A container from the lab standing at (fx, fz) with its floor at y. Its glass goes into the grid at once, so the experiment can fill it
+  // cell by cell, and the player can then pick it up, pour it and heat it like any other. Headless tests that do not load the lab get a glass
+  // shell of the same shape. Returns { cx, cz, by, h, r, inside, v }: inside lists its open cells, and v is the lab object, if there is one.
+  function vessel(type, fx, fz, radius, height, opts) {
+    opts = opts || {};
+    var x = X(fx), z = Z(fz), y = opts.y || 1, r = opts.exact ? radius : cells(radius), h = opts.exact ? height : cells(height);
+    if (hasLab()) {
+      var v = Lab.spawnBeaker(x + 0.5, y, z + 0.5, { type: type, radius: r, height: h, name: opts.name });
+      v.stopper = !!opts.stopper; v.sealed = !!opts.sealed;
+      Lab.setDownNow(v);
+      if (v.shell) return { cx: v.shell.cx, cz: v.shell.cz, by: v.shell.by, h: v.shell.h, r: r, inside: v.shell.inside, v: v };
+      Lab.remove(v);
+    }
+    var R = Math.ceil(r + 1.5), ro2 = (r + 1.5) * (r + 1.5), inside = [];
+    for (var yy = y; yy <= y + h + (opts.stopper ? 1 : 0); yy++) for (var dz = -R; dz <= R; dz++) for (var dx = -R; dx <= R; dx++) {
+      var d2 = dx * dx + dz * dz;
+      if (d2 > ro2) continue;
+      if (yy === y || yy > y + h || d2 > r * r) Sim.place(x + dx, yy, z + dz, WALL, P_STATIC, undefined, true);
+      else inside.push(Sim.idx(x + dx, yy, z + dz));
+    }
+    return { cx: x, cz: z, by: y, h: h, r: r, inside: inside, v: null };
+  }
+  // Calls fn(x, y, z, i) for each open cell of a vessel in rows from to to, where row 1 is the first above its floor.
+  function rows(c, from, to, fn) {
+    var WD = W * D;
+    c.inside.forEach(function (i) {
+      var y = (i / WD) | 0, row = y - c.by;
+      if (row < from || row > to) return;
+      var rest = i - y * WD, z = (rest / W) | 0;
+      fn(rest - z * W, y, z, i);
+    });
+  }
+  // Fill rows of a vessel with one substance, or with water holding a solute at a molarity.
+  function pour(c, from, to, id, solute, molar, t) {
+    rows(c, from, to, function (x, y, z, i) { Sim.place(x, y, z, id, P_POWDER, t, true); if (solute) dissolve(i, solute, molar); });
+  }
+  // A molarity is stored as the share of a full cell of solute. No more than water can hold, or the surface crusts over as it dries.
+  function dissolve(i, solute, molar) { Sim.AUX[i] = solute; Sim.USED[i] = 1 - Math.min(Mat.saturation(solute), molar / (Mat.n0[solute] * 1000)); }
+  // A small block of something held above a vessel, which falls in when the experiment starts. dx, dz are from its centre.
+  function dropInto(c, dx, dz, half, high, id, t, above) {
+    var y0 = c.by + c.h + (above == null ? cells(3) : above), x = c.cx + dx, z = c.cz + dz;
+    Sim.box(x - half, y0, z - half, x + half, y0 + high - 1, z + half, id, P_POWDER, t);
+  }
+  // A hot plate (or a stirrer) at (fx, fz). Returns the row things stand on. Without the lab, a steel slab at the same temperature stands in.
+  function plate(fx, fz, half, setT, opts) {
+    opts = opts || {};
+    var x = X(fx), z = Z(fz), hw = cells(half);
+    if (hasLab()) {
+      var o = { half: hw, setT: setT, name: opts.name };
+      var p = opts.stir != null ? Lab.spawnStirrer(x + 0.5, 1, z + 0.5, Object.assign(o, { stir: opts.stir })) : Lab.spawnPlate(x + 0.5, 1, z + 0.5, o);
+      Lab.placePlateNow(p);
+      if (p.stamp) return p.stamp.top;
+    }
+    Sim.box(x - hw, 1, z - hw, x + hw, 2, z + hw, 26, P_STATIC, setT == null ? undefined : setT);
+    return 3;
+  }
+  // A dropper held in a clamp over a vessel, full of a solution, letting it in a drop a tick from the start. Without the lab the same
+  // solution is a small block above the surface instead.
+  function dropper(c, surface, solute, molar, n, name) {
+    var water = Mat.named("H2O");
+    if (hasLab()) {
+      var d = Lab.spawnTool("dropper", c.cx + 0.5, surface + 3, c.cz + 0.5, { clamp: true, cap: n, name: name });
+      d.contents.push({ mat: water, form: P_LIQUID, aux: solute, aux2: 0, n: n, T: Sim.ambient, used: 1 - Math.min(Mat.saturation(solute), molar / (Mat.n0[solute] * 1000)), u2: 0 });
+      Lab.squeeze(d);
+      return;
+    }
+    var hw = Math.max(1, Math.round(Math.cbrt(n) / 2)), y0 = surface + 2;
+    for (var y = y0; y < y0 + 2; y++) for (var z = c.cz - hw; z <= c.cz + hw; z++) for (var x = c.cx - hw; x <= c.cx + hw; x++) {
+      Sim.place(x, y, z, water, P_POWDER, undefined, true);
+      dissolve(Sim.idx(x, y, z), solute, molar);
+    }
+  }
+  // A Geiger counter held in a clamp with its window a few cells over a vessel, near the rim so its stand is outside.
+  function geiger(c, surface) {
+    if (hasLab()) Lab.spawnTool("geiger", c.cx + c.r - 0.5, surface + 3, c.cz + 0.5);
+  }
+  // A power supply over a vessel, switched on, whose rods come to rest on its floor. Without the lab, two electrode rods stand there instead.
+  function supply(c, volts, name) {
+    if (hasLab()) { Lab.spawnSupply(c.cx + 0.5, c.by + c.h + 4, c.cz + 0.5, { on: true, volts: volts, name: name }); return; }
+    [-2, 2].forEach(function (g) { Sim.box(c.cx + g, c.by + 1, c.cz, c.cx + g, c.by + c.h - 1, c.cz, ELECTRODE, P_STATIC); });
+  }
+
   var list = [
     {
       id: "alkali", name: "Alkali metals in water", tag: "Group 1",
-      text: "Li, Na, K, Rb and Cs fall into a pool, left to right. Ionisation energy drops down the group, so each one reacts harder than the last.",
+      text: "Lithium, sodium and potassium in the front row, rubidium and caesium behind, each dropped into its own beaker of water. Ionisation energy drops down the group, so each one reacts with water faster than the last. Rubidium and caesium are so reactive that they catch fire in the air on the way down, and hot lithium sometimes does too.",
       build: function () {
-        box(0, 0, 0, 1, 0.16, 1, f("H2O"), P_POWDER);
-        [3, 11, 19, 37, 55].forEach(function (z, k) {
-          var c = 0.14 + k * 0.18;
-          box(c - 0.035, 0.26, 0.46, c + 0.035, 0.32, 0.54, z, P_POWDER);
+        [[3, 0.2, 0.32, "lithium"], [11, 0.5, 0.32, "sodium"], [19, 0.8, 0.32, "potassium"], [37, 0.35, 0.7, "rubidium"], [55, 0.65, 0.7, "caesium"]].forEach(function (m) {
+          var b = vessel("beaker", m[1], m[2], 4, 12, { name: "Beaker (" + m[3] + ")" });
+          pour(b, 1, cells(9), f("H2O"));
+          dropInto(b, 0, 0, cells(2), cells(3), m[0], undefined, cells(2));
         });
       }
     },
     {
-      id: "thermite", name: "Thermite on a steel plate", tag: "Redox",
-      text: "Aluminium grains and rust sit still until the hot spot on top reaches about 1100 K. The front then spreads by itself, and molten iron sinks through the slag.",
+      id: "thermite", name: "Thermite in a crucible", tag: "Redox",
+      text: "Aluminium grains and rust fill a crucible. They sit still until the hot spot on top reaches about 1100 K. The front then spreads by itself, and molten iron sinks through the slag to the bottom.",
       build: function () {
-        box(0.2, 0.22, 0.2, 0.8, 0.26, 0.8, 26, P_STATIC);
-        box(0.2, 0, 0.2, 0.26, 0.21, 0.26, 26, P_STATIC); box(0.74, 0, 0.74, 0.8, 0.21, 0.8, 26, P_STATIC);
-        box(0.74, 0, 0.2, 0.8, 0.21, 0.26, 26, P_STATIC); box(0.2, 0, 0.74, 0.26, 0.21, 0.8, 26, P_STATIC);
-        var fe = f("Fe2O3");
-        for (var y = Y(0.27); y <= Y(0.48); y++) for (var z = Z(0.36); z <= Z(0.64); z++) for (var x = X(0.36); x <= X(0.64); x++) {
-          Sim.place(x, y, z, (x + y + z) & 1 ? 13 : fe, P_POWDER, undefined, true);
-        }
-        Sim.forSphere(X(0.5), Y(0.48), Z(0.5), 2, function (x, y, z, i) { if (Sim.ID[i] !== AIR) Sim.T[i] = 1600; });
+        var c = vessel("crucible", 0.5, 0.5, 7, 9, { name: "Crucible (thermite)" }), fe = f("Fe2O3"), top = cells(7);
+        rows(c, 1, top, function (x, y, z) { Sim.place(x, y, z, (x + y + z) & 1 ? 13 : fe, P_POWDER, undefined, true); });
+        Sim.forSphere(c.cx, c.by + top, c.cz, 2, function (x, y, z, i) { if (Sim.ID[i] !== AIR && Sim.ID[i] !== WALL) Sim.T[i] = 1600; });
       }
     },
     {
@@ -68,110 +152,111 @@ var Scenes = (function () {
     },
     {
       id: "decay", name: "Decay chains", tag: "Radioactivity",
-      text: "Four piles decay at their own pace: oganesson, plutonium, radium and polonium. Watch the census: alpha and beta decay walk everything down the chart to stable lead, while the heaviest nuclei split into mid-table fission fragments.",
+      text: "Four crucibles hold oganesson, plutonium, radium and polonium, each decaying at its own pace, and a Geiger counter hangs over the polonium. Watch the census: alpha and beta decay walk everything down the chart to stable lead, while the heaviest nuclei split into mid-table fission fragments.",
       build: function () {
-        [[118, 0.2, 0.2], [94, 0.8, 0.2], [88, 0.2, 0.8], [84, 0.8, 0.8]].forEach(function (r) {
-          box(r[1] - 0.1, 0, r[2] - 0.1, r[1] + 0.1, 0.16, r[2] + 0.1, r[0], P_POWDER);
+        [[118, 0.3, 0.3, "oganesson"], [94, 0.7, 0.3, "plutonium"], [88, 0.3, 0.7, "radium"], [84, 0.7, 0.7, "polonium"]].forEach(function (s) {
+          var c = vessel("crucible", s[1], s[2], 6, 6, { name: "Crucible (" + s[3] + ")" });
+          pour(c, 1, cells(5), s[0]);
+          if (s[0] === 84) geiger(c, c.by + cells(5));
         });
         Sim.setDecayScale(3);
       }
     },
     {
       id: "discharge", name: "Noble gas discharge tubes", tag: "Group 18",
-      text: "Five sealed tubes hold He, Ne, Ar, Kr and Xe, each with an electrode at its foot. Each gas glows in its own emission colour.",
+      text: "Five sealed glass tubes hold He, Ne, Ar, Kr and Xe, each with an electrode at its foot. Each gas glows in its own emission colour.",
       build: function () {
-        [2, 10, 18, 36, 54].forEach(function (z, k) {
-          var a = X(0.12 + k * 0.17), b = Z(0.42), c = a + 8, d = b + 8, top = Y(0.8);
-          Sim.box(a, 1, b, c, top, b, WALL, P_STATIC); Sim.box(a, 1, d, c, top, d, WALL, P_STATIC);
-          Sim.box(a, 1, b, a, top, d, WALL, P_STATIC); Sim.box(c, 1, b, c, top, d, WALL, P_STATIC);
-          Sim.box(a, top, b, c, top, d, WALL, P_STATIC);
-          Sim.box(a + 1, 2, b + 1, c - 1, top - 1, d - 1, z, P_POWDER);
-          Sim.place(a + 4, 1, b + 4, ELECTRODE, P_STATIC, undefined, true);
+        [[2, "helium"], [10, "neon"], [18, "argon"], [36, "krypton"], [54, "xenon"]].forEach(function (g, k) {
+          var t = vessel("tube", 0.14 + k * 0.18, 0.5, 2, 24, { stopper: true, sealed: true, name: "Discharge tube (" + g[1] + ")" });
+          pour(t, 1, t.h, g[0]);
+          Sim.place(t.cx, t.by + 1, t.cz, ELECTRODE, P_STATIC, undefined, true);
         });
       }
     },
     {
       id: "flames", name: "Flame tests", tag: "Emission",
-      text: "Metal powders burn on a hot plate. The colours are the real flame-test colours: lithium crimson, sodium yellow, potassium lilac, copper blue-green and barium apple green.",
+      text: "Eight gas burners, each with a ring of a metal salt or oxide around its nozzle. The flame takes its colour from the metal, as in a real flame test: lithium crimson, sodium yellow, potassium lilac, copper blue-green, barium apple green, strontium red, calcium orange-red and boron green. They burn for as long as the gas is on, and the Lab tool turns each one off.",
       build: function () {
-        [3, 11, 19, 29, 56, 38, 20, 5].forEach(function (z, k) {
-          var a = 0.1 + (k % 4) * 0.26, c = 0.25 + (k >> 2) * 0.5;
-          box(a - 0.06, 0, c - 0.08, a + 0.06, 0.05, c + 0.08, WALL, P_STATIC);
-          box(a - 0.045, 0.06, c - 0.06, a + 0.045, 0.1, c + 0.06, z, P_POWDER, Math.max(ELEMENTS[z].ign + 30, 500));
+        // Burners grow with the chamber: s is 1 in the 64-cell chamber and 2 in the 128-cell one.
+        var s = Math.max(1, Math.round(Math.min(W, D) / 64)), r = s - 1, rim = r + s + 1, deep = 2 * s, core = 5 * s, h = 3 + s;
+        ["LiCl", "NaCl", "KCl", "CuO", "BaCl2", "SrCl2", "CaCl2", "B2O3"].forEach(function (salt, k) {
+          var cx = X(0.14 + (k % 4) * 0.24), cz = Z(0.3 + (k >> 2) * 0.4), top = 1 + h;
+          // A burner is lab equipment. Headless tests that do not load the lab still get the stand and the sample, only without the flame.
+          if (hasLab()) top = Lab.placePlateNow(Lab.spawnBurner(cx + 0.5, 1, cz + 0.5, { name: "Burner (" + salt + ")", nozzle: r, core: core, half: rim, h: h })).stamp.top;
+          else Sim.box(cx - rim, 1, cz - rim, cx + rim, top - 1, cz + rim, WALL, P_STATIC);
+          // The sample is a cake of salt around the nozzle, in a dish whose rim keeps it there once the flame melts it.
+          for (var dy = 0; dy < deep; dy++) for (var dz = -rim; dz <= rim; dz++) for (var dx = -rim; dx <= rim; dx++) {
+            var ring = Math.max(Math.abs(dx), Math.abs(dz));
+            if (ring === rim) Sim.place(cx + dx, top + dy, cz + dz, WALL, P_STATIC, undefined, true);
+            else if (ring > r) Sim.place(cx + dx, top + dy, cz + dz, f(salt), P_STATIC, undefined, true);
+          }
         });
       }
     },
     {
       id: "density", name: "Density column", tag: "Buoyancy",
-      text: "Mercury, bromine and water stack by real density. Four metals drop in: iron floats on the mercury and gold sinks through it, while aluminium and magnesium stop on the bromine.",
+      text: "Mercury, carbon tetrachloride, water and octane stack by real density in a tall beaker. Four things drop in. Iron and aluminium sink through the top three and float on the mercury. Gold is heavier still, so it sinks into the mercury and dissolves as an amalgam. Ice stops where the water meets the octane, and slowly melts.",
       build: function () {
-        tank(0.25, 0.25, 0.75, 0.75, 0.9);
-        box(0.26, 0, 0.26, 0.74, 0.14, 0.74, 80, P_POWDER);
-        box(0.26, 0.15, 0.26, 0.74, 0.27, 0.74, 35, P_POWDER);
-        box(0.26, 0.28, 0.26, 0.74, 0.42, 0.74, f("H2O"), P_POWDER);
-        box(0.3, 0.6, 0.3, 0.38, 0.65, 0.38, 26, P_POWDER);
-        box(0.62, 0.6, 0.3, 0.7, 0.65, 0.38, 79, P_POWDER);
-        box(0.3, 0.6, 0.62, 0.38, 0.65, 0.7, 13, P_POWDER);
-        box(0.62, 0.6, 0.62, 0.7, 0.65, 0.7, 12, P_POWDER);
-      }
-    },
-    {
-      id: "star", name: "Stellar forge", tag: "Fusion",
-      text: "A self-gravitating ball of hydrogen plasma at 800 million K burns to helium, then carbon and beyond. It stops at iron, where fusion stops paying. Watch the census climb the table.",
-      build: function () {
-        Sim.lid = true;
-        var cx = X(0.5), cy = Y(0.45), cz = Z(0.5), r = Math.floor(Math.min(W, H, D) * 0.2);
-        Sim.star = { x: cx, y: cy, z: cz };
-        Sim.forSphere(cx, cy, cz, r, function (x, y, z, i) { Sim.place(x, y, z, 1, P_POWDER, 8e8, true); Sim.PH[i] = P_PLASMA; });
+        var c = vessel("flask", 0.5, 0.5, 8, 28, { name: "Large beaker (density column)" }), L = cells(5), q = cells(3), hw = cells(2), hi = cells(3);
+        pour(c, 1, L, 80); pour(c, L + 1, 2 * L, f("CCl4")); pour(c, 2 * L + 1, 3 * L, f("H2O")); pour(c, 3 * L + 1, 4 * L, f("C8H18"));
+        dropInto(c, -q, -q, hw, hi, 26); dropInto(c, q, -q, hw, hi, 79); dropInto(c, -q, q, hw, hi, 13); dropInto(c, q, q, hw, hi, f("H2O"), 240);
       }
     },
     {
       id: "acid", name: "Acids and the activity series", tag: "Electrochemistry",
-      text: "Zinc, iron and copper drop into hydrochloric acid: zinc fizzes fastest, copper not at all. Next door, aqua regia dissolves gold, which no single acid can touch.",
+      text: "Zinc, iron and copper drop into three beakers of hydrochloric acid: zinc fizzes fastest, copper not at all. In the fourth beaker, aqua regia dissolves gold, which no single acid can touch.",
       build: function () {
-        tank(0.08, 0.2, 0.48, 0.8, 0.3); tank(0.52, 0.2, 0.92, 0.8, 0.3);
-        box(0.09, 0, 0.21, 0.47, 0.18, 0.79, f("HCl"), P_POWDER);
-        box(0.53, 0, 0.21, 0.72, 0.18, 0.79, f("HCl"), P_POWDER);
-        box(0.73, 0, 0.21, 0.91, 0.18, 0.79, f("HNO3"), P_POWDER);
-        box(0.13, 0.4, 0.3, 0.21, 0.45, 0.4, 30, P_POWDER); box(0.24, 0.4, 0.3, 0.32, 0.45, 0.4, 26, P_POWDER); box(0.35, 0.4, 0.3, 0.43, 0.45, 0.4, 29, P_POWDER);
-        box(0.66, 0.4, 0.42, 0.78, 0.46, 0.58, 79, P_POWDER);
+        var hcl = f("HCl"), hno3 = f("HNO3"), deep = cells(6);
+        [[30, 0.3, 0.3, "zinc"], [26, 0.7, 0.3, "iron"], [29, 0.3, 0.7, "copper"]].forEach(function (m) {
+          var b = vessel("beaker", m[1], m[2], 4, 12, { name: "Beaker (" + m[3] + " in hydrochloric acid)" });
+          pour(b, 1, deep, hcl);
+          dropInto(b, 0, 0, cells(2), cells(2), m[0]);
+        });
+        // Aqua regia is three parts hydrochloric acid to one of nitric, mixed.
+        var g = vessel("beaker", 0.7, 0.7, 4, 12, { name: "Beaker (gold in aqua regia)" });
+        rows(g, 1, deep, function (x, y, z) { Sim.place(x, y, z, (x + 2 * y + 3 * z) % 4 ? hcl : hno3, P_POWDER, undefined, true); });
+        dropInto(g, 0, 0, cells(2), cells(3), 79);
       }
     },
     {
       id: "golden", name: "Golden rain", tag: "Precipitation",
-      text: "Clear solutions of lead nitrate and potassium iodide meet in the middle and throw down bright yellow lead iodide, exactly as the bench demonstration does.",
+      text: "In a large beaker, clear lead nitrate solution on one side and potassium iodide on the other meet in the middle and throw down bright yellow lead iodide, exactly as the bench demonstration does.",
       build: function () {
-        tank(0.15, 0.15, 0.85, 0.85, 0.5);
-        var w = f("H2O"), pb = f("Pb(NO3)2"), ki = f("KI"), mid = X(0.5);
-        for (var y = 1; y <= Y(0.22); y++) for (var z = Z(0.16); z <= Z(0.84); z++) for (var x = X(0.16); x <= X(0.84); x++) {
+        var c = vessel("flask", 0.5, 0.5, 11, 10, { name: "Large beaker (golden rain)" });
+        // Both at real strengths a bench could make: lead nitrate saturated, and twice as many moles of iodide, as the equation takes.
+        // A full share would be over eight times what water can hold, and its surface crusts over white as soon as it starts to dry.
+        var w = f("H2O"), pb = f("Pb(NO3)2"), ki = f("KI"), pbShare = Mat.saturation(pb), kiShare = Math.min(Mat.saturation(ki), 2 * pbShare * Mat.n0[pb] / Mat.n0[ki]);
+        rows(c, 1, cells(7), function (x, y, z, i) {
           Sim.place(x, y, z, w, P_POWDER, undefined, true);
-          Sim.AUX[Sim.idx(x, y, z)] = x < mid - 1 ? pb : (x > mid + 1 ? ki : 0);
-        }
+          if (x < c.cx - 1) { Sim.AUX[i] = pb; Sim.USED[i] = 1 - pbShare; }
+          else if (x > c.cx + 1) { Sim.AUX[i] = ki; Sim.USED[i] = 1 - kiShare; }
+        });
       }
     },
     {
       id: "filament", name: "Lamp filament and electrolysis", tag: "Electricity",
-      text: "The same current runs through two wires. Tungsten's higher resistance makes it glow from Joule heating, while copper only gets warm. Electrodes in the tank split water into hydrogen and oxygen.",
+      text: "The same current runs through two wires. Tungsten's higher resistance makes it glow white-hot from Joule heating, while copper stays far cooler. In air the hot tungsten soon burns through, which is why real lamps are filled with argon. At the front, a power supply's rods stand in a beaker of water and split it into hydrogen and oxygen.",
       build: function () {
-        var y = Y(0.45), z1 = Z(0.3), z2 = Z(0.42);
+        var y = Y(0.45), z1 = Z(0.25), z2 = Z(0.37);
         Sim.box(X(0.1), 1, z1, X(0.1), y, z1, 74, P_STATIC); Sim.box(X(0.1), y, z1, X(0.9), y, z1, 74, P_STATIC); Sim.box(X(0.9), 1, z1, X(0.9), y, z1, 74, P_STATIC);
         Sim.place(X(0.1), 1, z1, ELECTRODE, P_STATIC, undefined, true);
         Sim.box(X(0.1), 1, z2, X(0.1), y, z2, 29, P_STATIC); Sim.box(X(0.1), y, z2, X(0.9), y, z2, 29, P_STATIC); Sim.box(X(0.9), 1, z2, X(0.9), y, z2, 29, P_STATIC);
         Sim.place(X(0.1), 1, z2, ELECTRODE, P_STATIC, undefined, true);
-        tank(0.25, 0.58, 0.75, 0.9, 0.24);
-        box(0.26, 0, 0.59, 0.74, 0.17, 0.89, f("H2O"), P_POWDER);
-        Sim.box(X(0.36), 1, Z(0.74), X(0.36), Y(0.12), Z(0.74), ELECTRODE, P_STATIC);
-        Sim.box(X(0.64), 1, Z(0.74), X(0.64), Y(0.12), Z(0.74), ELECTRODE, P_STATIC);
+        var c = vessel("flask", 0.5, 0.74, 7, 14, { name: "Large beaker (water)" });
+        pour(c, 1, cells(10), f("H2O"));
+        supply(c, 12, "Power supply (electrolysis)");
       }
     },
     {
       id: "chain", name: "The uranium-238 decay chain", tag: "Isotopes",
-      text: "A sample of pure U-238 on a very fast clock. It walks the real chain, Th-234, Pa-234, U-234, Th-230, Ra-226, Rn-222 and on down to stable lead-206. Radon, being a gas, drifts away. Follow the log.",
+      text: "A dish of pure U-238 on a very fast clock, with a Geiger counter over it. It walks the real chain, Th-234, Pa-234, U-234, Th-230, Ra-226, Rn-222 and on down to stable lead-206. Radon, being a gas, drifts away. Follow the log.",
       build: function () {
         Sim.setDecayScale(600);
+        var c = vessel("dish", 0.5, 0.5, 11, 4, { name: "Evaporating dish (uranium-238)" });
         Sim.isotopeOverride = { 92: 238 };
-        box(0.35, 0, 0.35, 0.65, 0.16, 0.65, 92, P_POWDER);
+        pour(c, 1, cells(3), 92);
         Sim.isotopeOverride = null;
+        geiger(c, c.by + cells(3));
       }
     },
     {
@@ -212,131 +297,110 @@ var Scenes = (function () {
     },
     {
       id: "titration", name: "Acid-base titration", tag: "pH",
-      text: "A pool of dilute acid with phenolphthalein in it, colourless. Pour in sodium hydroxide, and where the base wins the water turns pink. Switch on pH view to see the whole field in colour.",
+      text: "A beaker of dilute hydrochloric acid with phenolphthalein in it, colourless, stands on a magnetic stirrer. A dropper lets in sodium hydroxide drop by drop, and the stirrer carries each drop round. At first the acid uses up each drop. Once the acid is gone, the end point, every drop that falls stays pink. Switch on pH view to see the whole field in colour.",
       build: function () {
-        tank(0.2, 0.2, 0.8, 0.8, 0.3);
-        var w = f("H2O"), hcl = f("HCl"), ind = f("Phenolphthalein");
-        for (var y = 1; y <= Y(0.22); y++) for (var z = Z(0.21); z <= Z(0.79); z++) for (var x = X(0.21); x <= X(0.79); x++) {
-          Sim.place(x, y, z, w, P_POWDER, undefined, true);
-          var i = Sim.idx(x, y, z); Sim.AUX[i] = hcl; Sim.USED[i] = 0.995; Sim.AUX2[i] = ind; Sim.U2[i] = 0.9;
-        }
-        box(0.45, 0.4, 0.45, 0.55, 0.46, 0.55, f("NaOH"), P_POWDER);
-      }
-    },
-    {
-      id: "boiler", name: "Boiler explosion", tag: "Pressure",
-      text: "A sealed steel tank of water sits on a hot plate. Boiling has nowhere to go, so pressure climbs and the boiling point rises with it. When the walls give way, the steam blows out. Watch the pressure graph.",
-      build: function () {
-        var a = X(0.36), b = X(0.64), c = Z(0.36), d = Z(0.64), bot = Y(0.08), top = Y(0.42);
-        Sim.box(a - 3, 1, c - 3, b + 3, bot - 1, d + 3, 26, P_STATIC, 1750);
-        Sim.box(a, bot, c, b, top, d, 26, P_STATIC);
-        Sim.box(a + 1, bot + 1, c + 1, b - 1, top - 1, d - 1, f("H2O"), P_POWDER, 360);
+        var top = plate(0.5, 0.5, 8, null, { stir: 2, name: "Stirrer" });
+        var c = vessel("beaker", 0.5, 0.5, 6, 12, { y: top, name: "Beaker (acid and phenolphthalein)" }), deep = cells(8), hcl = f("HCl"), ind = f("Phenolphthalein");
+        // The acid holds 45% as much as the dropper of 1 M base, so the end point comes a little before halfway, at any chamber size.
+        // That is about 0.02 M, as dilute as a school titration.
+        var n = drops(40), filled = 0;
+        rows(c, 1, deep, function () { filled++; });
+        rows(c, 1, deep, function (x, y, z, i) {
+          Sim.place(x, y, z, f("H2O"), P_POWDER, undefined, true);
+          dissolve(i, hcl, 0.45 * n / filled); Sim.AUX2[i] = ind; Sim.U2[i] = 0.9;
+        });
+        dropper(c, c.by + deep, f("NaOH"), 1, n, "Dropper (sodium hydroxide, 1 M)");
       }
     },
     {
       id: "bridge", name: "Melting supports", tag: "Structure",
       text: "A steel deck rests on lead pillars standing on a hot plate. As the lead softens and melts, the deck loses support and falls in one piece.",
       build: function () {
-        var y = Y(0.3);
-        Sim.box(X(0.22), 1, Z(0.3), X(0.78), Y(0.04), Z(0.7), 26, P_STATIC, 1100);
-        [[0.26, 0.34], [0.7, 0.34], [0.26, 0.62], [0.7, 0.62]].forEach(function (q) {
-          Sim.box(X(q[0]), Y(0.05), Z(q[1]), X(q[0] + 0.05), y, Z(q[1] + 0.05), 82, P_STATIC, 560);
+        var top = plate(0.5, 0.5, 10, 900, { name: "Hot plate" }), cx = X(0.5), cz = Z(0.5), ox = cells(7), oz = cells(5), w = cells(3) - 1, y = top + cells(11);
+        [[-1, -1], [1, -1], [-1, 1], [1, 1]].forEach(function (q) {
+          var x0 = cx + q[0] * ox - (q[0] < 0 ? w : 0), z0 = cz + q[1] * oz - (q[1] < 0 ? w : 0);
+          Sim.box(x0, top, z0, x0 + w, y, z0 + w, 82, P_STATIC, 560);
         });
-        Sim.box(X(0.24), y + 1, Z(0.32), X(0.78), y + 2, Z(0.68), 26, P_STATIC);
+        Sim.box(cx - ox - w - 1, y + 1, cz - oz - w - 1, cx + ox + w + 1, y + 2, cz + oz + w + 1, 26, P_STATIC);
       }
     },
     {
       id: "volcano", name: "Dichromate volcano", tag: "Decomposition",
-      text: "Ammonium dichromate is lit at the peak. It decomposes in a shower of sparks, leaving a fluffy heap of green chromium oxide, with nitrogen and steam carrying it upward.",
+      text: "A heap of ammonium dichromate in an evaporating dish is lit at the peak. It decomposes in a shower of sparks, leaving a fluffy heap of green chromium oxide, with nitrogen and steam carrying it upward.",
       build: function () {
-        var cx = X(0.5), cz = Z(0.5), R0 = Math.floor(Math.min(W, D) * 0.2), a = f("(NH4)2Cr2O7");
-        for (var y = 1; y <= R0; y++) Sim.forSphere(cx, y, cz, R0 - y + 1, function (x, yy, z) { if (yy === y) Sim.place(x, yy, z, a, P_POWDER, undefined, true); });
+        var R0 = Math.floor(Math.min(W, D) * 0.2), a = f("(NH4)2Cr2O7"), c = vessel("dish", 0.5, 0.5, R0 + 1, cells(3), { exact: true, name: "Evaporating dish (ammonium dichromate)" });
+        for (var y = 1; y <= R0; y++) Sim.forSphere(c.cx, c.by + y, c.cz, R0 - y + 1, function (x, yy, z) { if (yy === c.by + y) Sim.place(x, yy, z, a, P_POWDER, undefined, true); });
         // Dichromate conducts heat poorly, so a small warm spot dies out before it can light what is next to it.
-        Sim.forSphere(cx, R0, cz, Math.max(3, R0 >> 2), function (x, y, z, i) { if (Sim.ID[i] !== AIR) Sim.T[i] = 900; });
+        Sim.forSphere(c.cx, c.by + R0, c.cz, Math.max(3, R0 >> 2), function (x, y, z, i) { if (Sim.ID[i] !== AIR && Sim.ID[i] !== WALL) Sim.T[i] = 900; });
       }
     },
     {
       id: "toothpaste", name: "Hydrogen peroxide and catalyst", tag: "Catalysis",
-      text: "Peroxide on its own is almost stable at room temperature. Manganese dioxide falling through it sets off a rush of oxygen, without being used up.",
+      text: "A large beaker of peroxide is almost stable at room temperature. Manganese dioxide falling through it sets off a rush of oxygen, without being used up.",
       build: function () {
-        tank(0.3, 0.3, 0.7, 0.7, 0.34);
-        box(0.31, 0, 0.31, 0.69, 0.24, 0.69, f("H2O2"), P_POWDER);
-        box(0.44, 0.5, 0.44, 0.56, 0.54, 0.56, f("MnO2"), P_POWDER);
+        var c = vessel("flask", 0.5, 0.5, 8, 18, { name: "Large beaker (hydrogen peroxide)" });
+        pour(c, 1, cells(10), f("H2O2"));
+        dropInto(c, 0, 0, cells(3), cells(2), f("MnO2"));
       }
     },
     {
       id: "snake", name: "Sugar and sulfuric acid", tag: "Dehydration",
-      text: "Concentrated sulfuric acid rips the water out of table sugar. A hot, steaming column of black carbon is left behind.",
+      text: "Concentrated sulfuric acid poured over table sugar in a beaker rips the water out of it. A hot, steaming column of black carbon is left behind.",
       build: function () {
-        tank(0.32, 0.32, 0.68, 0.68, 0.3);
-        box(0.33, 0, 0.33, 0.67, 0.14, 0.67, f("C12H22O11"), P_POWDER);
-        box(0.4, 0.3, 0.4, 0.6, 0.36, 0.6, f("H2SO4"), P_POWDER);
+        var c = vessel("flask", 0.5, 0.5, 8, 22, { name: "Large beaker (sugar)" }), s = cells(8);
+        pour(c, 1, s, f("C12H22O11"));
+        pour(c, s + 1, s + cells(3), f("H2SO4"));
       }
     },
     {
       id: "gunpowder", name: "Black powder", tag: "Explosive",
-      text: "Saltpetre, sulfur and charcoal, mixed as they have been for a thousand years, hold still until they reach 600 K. Then the hot spot runs through the whole charge.",
+      text: "Saltpetre, sulfur and charcoal in an evaporating dish, mixed as they have been for a thousand years, hold still until they reach 600 K. Then the hot spot runs through the whole charge.",
       build: function () {
-        var k = f("KNO3");
-        for (var y = 1; y <= Y(0.2); y++) for (var z = Z(0.38); z <= Z(0.62); z++) for (var x = X(0.38); x <= X(0.62); x++) {
-          var r = (x * 7 + y * 13 + z * 5) % 8;
-          Sim.place(x, y, z, r < 5 ? k : (r < 7 ? 6 : 16), P_POWDER, undefined, true);
-        }
-        Sim.forSphere(X(0.5), Y(0.2), Z(0.5), 2, function (x, y, z, i) { if (Sim.ID[i] !== AIR) Sim.T[i] = 900; });
+        var k = f("KNO3"), c = vessel("dish", 0.5, 0.5, 10, 5, { name: "Evaporating dish (black powder)" }), deep = cells(5);
+        rows(c, 1, deep, function (x, y, z) { var r = (x * 7 + y * 13 + z * 5) % 8; Sim.place(x, y, z, r < 5 ? k : (r < 7 ? 6 : 16), P_POWDER, undefined, true); });
+        Sim.forSphere(c.cx, c.by + deep, c.cz, 2, function (x, y, z, i) { if (Sim.ID[i] !== AIR && Sim.ID[i] !== WALL) Sim.T[i] = 900; });
       }
     },
     {
       id: "triiodide", name: "Contact explosive", tag: "Explosive",
-      text: "Nitrogen triiodide sits on a warm plate. It only needs the slightest disturbance, and it goes up in a cloud of violet iodine vapour.",
+      text: "Nitrogen triiodide sits on a warm hot plate. It only needs the slightest disturbance, and it goes up in a cloud of violet iodine vapour.",
       build: function () {
-        box(0.3, 0, 0.3, 0.7, 0.05, 0.7, 26, P_STATIC, 300);
+        var top = plate(0.5, 0.5, 12, 310, { name: "Hot plate" }), cx = X(0.5), cz = Z(0.5), s = cells(3), n = f("NI3");
         for (var k = 0; k < 6; k++) {
-          var a = 0.34 + (k % 3) * 0.13, c = 0.38 + (k >> 1 & 1) * 0.24;
-          box(a, 0.06, c, a + 0.06, 0.1, c + 0.06, f("NI3"), P_POWDER, 305);
+          var a = cx + ((k % 3) - 1) * cells(8) - (s >> 1), c = cz + (k < 3 ? -1 : 1) * cells(5) - (s >> 1);
+          Sim.box(a, top, c, a + s, top + cells(2) - 1, c + s, n, P_POWDER, 305);
         }
       }
     },
     {
       id: "colours", name: "Colour tests", tag: "Complexes",
-      text: "Four pools. Ammonia turns pale copper sulfate royal blue. Thiocyanate turns iron(III) blood red. Chromate falls out of lead solution as chrome yellow, and of silver as brick red.",
+      text: "Four beakers, each with a dropper of reagent over it. Ammonia turns pale copper sulfate royal blue. Thiocyanate turns iron(III) blood red. Chromate falls out of lead solution as chrome yellow, and of silver as brick red.",
       build: function () {
-        function pool(ax, az, bx, bz, solute, drop) {
-          tank(ax, az, bx, bz, 0.2);
-          var w = f("H2O"), s = f(solute);
-          for (var y = 1; y <= Y(0.14); y++) for (var z = Z(az) + 1; z < Z(bz); z++) for (var x = X(ax) + 1; x < X(bx); x++) {
-            Sim.place(x, y, z, w, P_POWDER, undefined, true); Sim.AUX[Sim.idx(x, y, z)] = s;
-          }
-          box((ax + bx) / 2 - 0.05, 0.16, (az + bz) / 2 - 0.05, (ax + bx) / 2 + 0.05, 0.2, (az + bz) / 2 + 0.05, f(drop), P_POWDER);
+        // Pools at bench strength, molar, and reagents at dropM. A full share of salt in every cell would be 14 to 26 M, far past what water
+        // holds, and the pools crusted over white as soon as their surface began to dry. The reagent goes in as a solution, from a dropper,
+        // as it does on the bench. Dry grains sat on the bottom and hid the colours, because the products soon fill the water's room for a third solute.
+        function test(fx, fz, solute, drop, molar, dropM, name, dropName) {
+          var c = vessel("beaker", fx, fz, 6, 9, { name: "Beaker (" + name + ")" }), deep = cells(5);
+          pour(c, 1, deep, f("H2O"), f(solute), molar);
+          dropper(c, c.by + deep, f(drop), dropM, drops(60), "Dropper (" + dropName + ")");
         }
-        pool(0.06, 0.06, 0.46, 0.46, "CuSO4", "NH3");
-        pool(0.54, 0.06, 0.94, 0.46, "FeCl3", "NH4SCN");
-        pool(0.06, 0.54, 0.46, 0.94, "Pb(NO3)2", "K2CrO4");
-        pool(0.54, 0.54, 0.94, 0.94, "AgNO3", "K2CrO4");
-      }
-    },
-    {
-      id: "furnace", name: "Blast furnace", tag: "Industry",
-      text: "Layers of iron ore, coke and limestone are heated from below. Carbon and carbon monoxide reduce the ore, limestone turns to lime and then slag, and molten iron collects at the bottom.",
-      build: function () {
-        tank(0.3, 0.3, 0.7, 0.7, 0.75);
-        var ore = f("Fe2O3"), lime = f("CaCO3"), sand = f("SiO2");
-        for (var y = 1; y <= Y(0.6); y++) for (var z = Z(0.31); z <= Z(0.69); z++) for (var x = X(0.31); x <= X(0.69); x++) {
-          var band = (y >> 2) % 4, id = band === 0 ? 6 : (band === 1 ? ore : (band === 2 ? 6 : ((x + z) % 3 ? lime : sand)));
-          Sim.place(x, y, z, id, P_POWDER, y < 6 ? 1500 : undefined, true);
-        }
+        // The copper complex takes four ammonia for each copper, so that pool is dilute and its ammonia as strong as water will hold, as on the bench.
+        test(0.27, 0.27, "CuSO4", "NH3", 0.1, 15, "copper sulfate", "ammonia");
+        test(0.73, 0.27, "FeCl3", "NH4SCN", 0.5, 2, "iron(III) chloride", "ammonium thiocyanate");
+        test(0.27, 0.73, "Pb(NO3)2", "K2CrO4", 0.5, 2, "lead nitrate", "potassium chromate");
+        test(0.73, 0.73, "AgNO3", "K2CrO4", 0.5, 2, "silver nitrate", "potassium chromate");
       }
     },
     {
       id: "cryo", name: "Cryogenic bench", tag: "Low temperature",
-      text: "A pool of liquid nitrogen at 77 K boils off around a warm iron block. A pool of liquid oxygen is pale blue. Gallium melts from nothing more than a warm block's heat.",
+      text: "A large beaker of liquid nitrogen at 77 K boils off around an iron block dropped into it. A beaker of liquid oxygen is pale blue. At the front, gallium melts in a crucible on a hot plate set no warmer than a hand.",
       build: function () {
-        tank(0.08, 0.2, 0.48, 0.8, 0.22); tank(0.52, 0.2, 0.92, 0.8, 0.22);
-        box(0.09, 0, 0.21, 0.47, 0.14, 0.79, 7, P_POWDER, 70);
-        box(0.53, 0, 0.21, 0.91, 0.14, 0.79, 8, P_POWDER, 80);
-        box(0.22, 0.2, 0.42, 0.34, 0.3, 0.58, 26, P_POWDER);
-        box(0.42, 0.45, 0.4, 0.58, 0.48, 0.6, WALL, P_STATIC);
-        box(0.45, 0.49, 0.43, 0.55, 0.55, 0.57, 31, P_POWDER);
-        box(0.45, 0.56, 0.43, 0.55, 0.6, 0.57, 29, P_STATIC, 700);
+        var n2 = vessel("flask", 0.27, 0.58, 8, 12, { name: "Large beaker (liquid nitrogen)" }), o2 = vessel("flask", 0.73, 0.58, 8, 12, { name: "Large beaker (liquid oxygen)" }), deep = cells(8);
+        pour(n2, 1, deep, 7, 0, 0, 70);
+        pour(o2, 1, deep, 8, 0, 0, 80);
+        dropInto(n2, 0, 0, cells(2), cells(3), 26);
+        var top = plate(0.5, 0.16, 5, 330, { name: "Hot plate" }), ga = vessel("crucible", 0.5, 0.16, 3, 4, { y: top, name: "Crucible (gallium)" });
+        pour(ga, 1, cells(3), 31);
       }
     }
   ];
@@ -418,7 +482,7 @@ var Scenes = (function () {
       { text: "Choose the Heat tool and hold it on the water. The temperature climbs, then stops at 373 K while the water boils, because the energy goes into turning liquid to steam.", check: function () { return amount(f("H2O")) > 0 && hottest() > 370; } }
     ] },
     { id: "flame", title: "Why flames have colours", steps: [
-      { text: "Metal powders are burning on hot plates. Each element gives off its own colours of light as its excited electrons fall back. Watch for lithium crimson and barium green.", setup: function (ui) { ui.loadScene("flames"); }, check: function () { return logged("O"); } },
+      { text: "Gas burners heat a ring of metal salt each. Each element gives off its own colours of light as its excited electrons fall back. Watch for lithium crimson and barium green.", setup: function (ui) { ui.loadScene("flames"); }, check: function () { return logged("O"); } },
       { text: "Try it yourself. Select copper in the periodic table, then heat some with the Heat tool until it burns blue-green.", setup: function (ui) { Sim.clear(); }, check: function () { return logged("Cu"); } }
     ] },
     { id: "ratios", title: "Reaction ratios and limiting reagents", steps: [
@@ -426,7 +490,7 @@ var Scenes = (function () {
       { text: "Hover on a cell. Partly used reactant shows how much of it is left, as a percentage. Press Next when you have found one.", manual: true }
     ] },
     { id: "ph", title: "Acids, bases and pH", steps: [
-      { text: "Sodium hydroxide falls into acid. Phenolphthalein stays colourless in acid and turns pink above pH 8.2. Watch for pink where the base wins.", setup: function (ui) { ui.loadScene("titration"); }, check: function () { return logged("NaOH") || logged("H₂O"); } },
+      { text: "Sodium hydroxide drips into acid. Phenolphthalein stays colourless in acid and turns pink above pH 8.2. Watch for pink where the base wins.", setup: function (ui) { ui.loadScene("titration"); }, check: function () { return logged("NaOH") || logged("H₂O"); } },
       { text: "Press the pH view button. Now every water cell shows its computed pH, on the universal indicator scale. Hover to read the number.", check: function () { return Render.viewMode === "ph"; } }
     ] },
     { id: "battery", title: "How a battery works", steps: [

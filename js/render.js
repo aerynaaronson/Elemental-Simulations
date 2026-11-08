@@ -2,7 +2,8 @@
 // Colours live in 3D textures that are re-uploaded per dirty chunk. Rays walk the grid with a DDA,
 // skip empty blocks using a coarse occupancy and light volume, blend through liquids and gases, and stop at the first opaque voxel.
 var Render = (function () {
-  var R = { camera: { yaw: 0.72, pitch: 0.46, dist: 1.0, tx: 0, ty: 0, tz: 0 }, scale: 1, showGrid: true, viewMode: "normal", fps: 0, brush: null };
+  // camera is where the view is heading. Input and code set it; the view glides there, so orbiting and zooming never jump.
+  var R = { camera: { yaw: 0.72, pitch: 0.46, dist: 1.0, tx: 0, ty: 0, tz: 0 }, scale: 1, showGrid: true, viewMode: "normal", fps: 0, brush: null, room: true, drawing: true };
   var gl, canvas, prog, pointProg, vao, texColor, texEmit, texCoarse, W, H, D, BLOCK = 8, cW, cH, cD;
   var colorBuf, emitBuf, coarseBuf, pointBuf, pointVbo, pointVao, U = {}, PU = {}, ok = false;
   var view = { invVP: null, VP: null, eye: [0, 0, 0] };
@@ -82,6 +83,59 @@ var Render = (function () {
   ].join("\n");
   FS = FS.replace("void main(){", "float k1(vec3 t){return max(t.r,max(t.g,t.b));}\nvoid main(){");
 
+  // The laboratory around the chamber, traced analytically, so it costs a few box tests per background pixel and nothing else.
+  // The chamber stands on an island bench in a tiled room, with reagent shelves on the back wall, ceiling panels and a window on the side the
+  // light comes from. Units are cells, scaled to the chamber, so the room fits any size. Returns the colour and the distance along the ray,
+  // which the realistic look needs for its frame-to-frame reprojection.
+  var ROOM_GLSL = [
+    "uniform int uRoom;",
+    "float rh(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}",
+    "vec3 bxN(vec3 p,vec3 lo,vec3 hi){vec3 a=abs(p-lo),b=abs(p-hi);float m=min(min(min(a.x,b.x),min(a.y,b.y)),min(a.z,b.z));",
+    " if(m==a.x)return vec3(-1.,0.,0.);if(m==b.x)return vec3(1.,0.,0.);if(m==a.y)return vec3(0.,-1.,0.);if(m==b.y)return vec3(0.,1.,0.);if(m==a.z)return vec3(0.,0.,-1.);return vec3(0.,0.,1.);}",
+    "float grout(vec2 q,float s){vec2 g=abs(fract(q/s)-.5)*s;return 1.-smoothstep(0.,s*.045,min(g.x,g.y));}",
+    "vec4 room(vec3 ro,vec3 rd,vec3 L){",
+    " rd=safe(rd);float S=max(uDim.x,uDim.z);vec3 C=vec3(uDim.x*.5,1.,uDim.z*.5);float yF=1.-1.45*S,yC=yF+5.6*S;",
+    " vec3 rlo=vec3(C.x-5.*S,yF,C.z-5.*S),rhi=vec3(C.x+5.*S,yC,C.z+5.*S);",
+    " float t=box(ro,rd,rlo,rhi).y;int m=0;vec3 N=-bxN(ro+rd*t,rlo,rhi);",
+    // The island bench the chamber stands on: a black resin top over grey cabinets.
+    " vec3 blo=vec3(C.x-.95*S,yF,C.z-.72*S),bhi=vec3(C.x+.95*S,1.,C.z+.72*S);vec2 bt=box(ro,rd,blo,bhi);",
+    " if(bt.x<bt.y&&bt.x>0.&&bt.x<t){t=bt.x;m=1;N=bxN(ro+rd*t,blo,bhi);}",
+    // Two shelves on the back wall. Bottles stand on them, drawn where the ray crosses the plane through their middles.
+    " vec4 bo=vec4(0.);float zW=rlo.z,x0=C.x-2.6*S,pitch=.11*S;",
+    " for(int k=0;k<2;k++){float yb=yF+(2.05+.62*float(k))*S;vec3 slo=vec3(x0,yb-.035*S,zW),shi=vec3(C.x+2.6*S,yb,zW+.34*S);",
+    "  vec2 st=box(ro,rd,slo,shi);if(st.x<st.y&&st.x>0.&&st.x<t){t=st.x;m=2;N=bxN(ro+rd*t,slo,shi);}",
+    "  float tp=(zW+.17*S-ro.z)/rd.z;if(tp>0.&&tp<t){vec3 q=ro+rd*tp;float u=(q.x-x0)/pitch,v=q.y-yb;",
+    "   if(u>0.&&u<5.2*S/pitch&&v>0.){float cell=floor(u),f=fract(u)-.5,h=rh(vec2(cell,float(k)));",
+    "    if(h<.72){float hgt=(.13+.2*rh(vec2(cell,float(k)+7.)))*S,wd=.3+.12*h;bool neck=v>hgt*.78;",
+    "     if(v<hgt&&abs(f)<(neck?wd*.4:wd)){t=tp;m=3;N=normalize(vec3(f*1.6,0.,1.));bo=vec4(cell,float(k),v/hgt,rh(vec2(cell,float(k)+3.)));}}}}",
+    " }",
+    " vec3 p=ro+rd*t,alb=vec3(.4),em=vec3(0.);float gloss=0.;",
+    " if(m==1){if(N.y>.5){alb=vec3(.032,.034,.037);gloss=.55;}",
+    "  else{vec2 q=N.x!=0.?p.zy:p.xy;alb=vec3(.3,.31,.32)*(1.-.5*grout(q-vec2(0.,yF),.42*S));if(p.y<yF+.09*S)alb=vec3(.05);if(p.y>1.-.06*S)alb=vec3(.04);gloss=.08;}}",
+    " else if(m==2){alb=vec3(.34,.28,.22);}",
+    " else if(m==3){float c=floor(bo.w*7.);alb=c<2.?vec3(.42,.2,.06):c<4.?vec3(.7,.74,.78):c<5.?vec3(.1,.2,.42):c<6.?vec3(.82,.82,.78):vec3(.36,.5,.4);",
+    "  if(bo.z>.3&&bo.z<.62)alb=mix(alb,vec3(.86,.85,.8),.8);gloss=.7;}",
+    " else if(N.y>.5){vec2 q=floor(p.xz/(.5*S));alb=vec3(.21,.22,.23)*(.92+.16*rh(q))*(1.-.35*grout(p.xz,.5*S));gloss=.12;}",
+    " else if(N.y<-.5){alb=vec3(.45);vec2 g=abs(mod(p.xz-C.xz+1.1*S,2.2*S)-1.1*S);if(g.x<.7*S&&g.y<.22*S)em=vec3(2.,1.96,1.85);}",
+    " else{vec2 q=N.x!=0.?p.zy:p.xy;if(p.y<yF+2.1*S){alb=vec3(.62,.64,.64)*(1.-.45*grout(q,.16*S));gloss=.2;}else alb=vec3(.42,.44,.46);",
+    "  if(N.x*L.x<-.3){vec2 w=abs(vec2(p.z-C.z,p.y-(yF+3.)-2.9*S))-vec2(1.7*S,.95*S);if(max(w.x,w.y)<0.){vec2 mu=abs(fract(vec2(p.z-C.z,p.y)/(.85*S))-.5);",
+    "   float bar=max(step(min(mu.x,mu.y),.03),step(-.06*S,max(w.x,w.y)));em=mix(vec3(1.5,1.75,2.15)*(1.+.35*clamp((p.y-yF-2.9*S)/S,-1.,1.)),vec3(.03),bar);alb=vec3(0.);gloss=0.;}}}",
+    // Contact shadows where things meet, worked out from distances rather than traced.
+    " float ao=1.;",
+    " if(m==0){vec3 e=min(p-rlo,rhi-p)+abs(N)*1e6;ao*=mix(.55,1.,smoothstep(0.,.6*S,min(e.x,min(e.y,e.z))));",
+    "  if(N.y>.5){vec2 dd=max(abs(p.xz-C.xz)-vec2(.95*S,.72*S),0.);ao*=mix(.4,1.,smoothstep(0.,.4*S,length(dd)));}}",
+    " if(m==1&&N.y>.5){vec2 dd=max(abs(p.xz-C.xz)-(C.xz-1.),0.);ao*=mix(.5,1.,smoothstep(0.,.07*S,length(dd)));}",
+    " vec3 amb=mix(vec3(.06,.06,.068),vec3(.16,.17,.19),N.y*.5+.5);float dif=max(dot(N,L),0.);",
+    " vec3 c=alb*ao*(amb+vec3(.6,.58,.54)*dif)+em;",
+    " if(gloss>0.){vec3 r=reflect(rd,N);c+=gloss*ao*(pow(max(dot(r,L),0.),60.)*vec3(.8,.78,.74)+.05*smoothstep(.1,.9,r.y));}",
+    // Further out the room falls into shadow, so the chamber stays the brightest thing in view.
+    " c*=mix(1.,.5,smoothstep(1.4*S,5.*S,length(p.xz-C.xz)));",
+    " return vec4(c,t);}"
+  ].join("\n");
+  var SAFE_FN = "vec3 safe(vec3 d){return d+vec3(1e-5)*step(abs(d),vec3(1e-5));}";
+  FS = FS.replace(SAFE_FN, SAFE_FN + "\n" + ROOM_GLSL);
+  FS = FS.replace(" vec3 back=sky(d);", " vec4 rm=uRoom==1?room(o,d,SUN):vec4(sky(d),-1.);vec3 back=rm.rgb;");
+
   // Post-processing: bloom built from a chain of half-size blurs, then tone mapping.
   var POST_FS = {
     bright: "#version 300 es\nprecision highp float;in vec2 vUv;out vec4 f;uniform sampler2D t;void main(){vec3 c=texture(t,vUv).rgb;float l=max(c.r,max(c.g,c.b));f=vec4(min(c,vec3(30.))*smoothstep(1.3,3.2,l),1.);}",
@@ -90,7 +144,8 @@ var Render = (function () {
   };
 
   var PVS = "#version 300 es\nprecision highp float;in vec4 aP;in vec4 aC;uniform mat4 uVP;uniform float uPx;out vec4 vC;void main(){gl_Position=uVP*vec4(aP.xyz,1.);gl_PointSize=clamp(aP.w*uPx/gl_Position.w,1.,48.);vC=aC;}";
-  var PFS = "#version 300 es\nprecision highp float;in vec4 vC;out vec4 f;void main(){vec2 d=gl_PointCoord-.5;float r=dot(d,d);if(r>.25)discard;float a=vC.a<.5?1.:1.-r*4.;f=vec4(vC.rgb*a,a);}";
+  // The fourth colour channel picks how a point is drawn: below .25 an opaque disc, .25 to .5 added light, above .5 a soft spot of that opacity.
+  var PFS = "#version 300 es\nprecision highp float;in vec4 vC;out vec4 f;void main(){vec2 d=gl_PointCoord-.5;float r=dot(d,d);if(r>.25)discard;float s=1.-r*4.;if(vC.a<.25)f=vec4(vC.rgb,1.);else if(vC.a<.5)f=vec4(vC.rgb*s*s,0.);else{float a=s*s*(vC.a-.5)*2.;f=vec4(vC.rgb*a,a);}}";
 
   function compile(type, src) {
     var s = gl.createShader(type);
@@ -110,7 +165,7 @@ var Render = (function () {
     gl = cv.getContext("webgl2", { antialias: false, alpha: false, depth: true, powerPreference: "high-performance" });
     if (!gl) return false;
     prog = link(VS, FS); pointProg = link(PVS, PFS);
-    ["uColor", "uEmit", "uCoarse", "uInvVP", "uVP", "uEye", "uDim", "uBrush", "uBrushR", "uTime", "uBlock", "uDirect"].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
+    ["uColor", "uEmit", "uCoarse", "uInvVP", "uVP", "uEye", "uDim", "uBrush", "uBrushR", "uTime", "uBlock", "uDirect", "uRoom"].forEach(function (n) { U[n] = gl.getUniformLocation(prog, n); });
     ["uVP", "uPx"].forEach(function (n) { PU[n] = gl.getUniformLocation(pointProg, n); });
     vao = gl.createVertexArray();
     pointVao = gl.createVertexArray(); pointVbo = gl.createBuffer();
@@ -119,7 +174,7 @@ var Render = (function () {
     gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 4, gl.FLOAT, false, 32, 0);
     gl.enableVertexAttribArray(aC); gl.vertexAttribPointer(aC, 4, gl.FLOAT, false, 32, 16);
     gl.bindVertexArray(null);
-    pointBuf = new Float32Array(8 * Sim.MAX_PARTICLES);
+    pointBuf = new Float32Array(8 * (Sim.MAX_PARTICLES + (typeof Effects !== "undefined" ? Effects.capacity : 0)));
     ok = true;
     hdr = !!gl.getExtension("EXT_color_buffer_float");
     if (hdr) { postBright = link(VS, POST_FS.bright); postBlur = link(VS, POST_FS.blur); postFinal = link(VS, POST_FS.final); try { initRealistic(); } catch (e) { console.error("Realistic renderer unavailable:", e); realFailed = true; realProg = null; R.look = "classic"; } }
@@ -204,10 +259,20 @@ var Render = (function () {
     texColor = tex3D(0, W, D, H, gl.RGBA8, gl.NEAREST);
     texEmit = tex3D(1, W, D, H, gl.RGBA8, gl.NEAREST);
     texCoarse = tex3D(2, cW, cD, cH, gl.RGBA8, gl.LINEAR);
-    R.camera.dist = Math.max(W, D) * 1.6;
-    R.camera.tx = W / 2; R.camera.ty = H * 0.34; R.camera.tz = D / 2;
+    R.resetCamera();
+    R.snapCamera();
     Sim.DIRTY.fill(1);
   };
+  // The view a new chamber opens with.
+  R.resetCamera = function () {
+    var c = R.camera;
+    c.yaw = 0.72; c.pitch = 0.46; c.dist = Math.max(W, D) * 1.6;
+    c.tx = W / 2; c.ty = H * 0.34; c.tz = D / 2;
+  };
+  // Furthest the camera may go, so the eye stays inside the laboratory around the chamber.
+  R.maxDist = function () { return Math.max(W, D) * 3; };
+  // Jump straight to the camera's target on the next frame, for a new chamber or a loaded file.
+  R.snapCamera = function () { shown = null; };
 
 
   var dirtyList = null;
@@ -223,6 +288,8 @@ var Render = (function () {
     Shade.time = time; Shade.heat = R.viewMode === "heat"; Shade.phView = R.viewMode === "ph";
     if (Pool.PARAMS) { Sim.writeParams(Pool.PARAMS); Shade.writeParams(Pool.PARAMS); }
     Pool.run(JOB_SHADE, dirtyList, n, Shade.chunkByIndex);
+    // Things drawn as voxels without being in the simulation, such as lab equipment, paint over the shaded chunks here.
+    if (R.afterShade) R.afterShade(dirtyList, n);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     if (n > total * 0.35) {   // most of the volume changed: one big upload beats hundreds of small ones
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, texColor);
@@ -277,8 +344,13 @@ var Render = (function () {
     return o;
   }
 
-  function updateCamera(w, h) {
-    var c = R.camera, cp = Math.cos(c.pitch), sp = Math.sin(c.pitch);
+  var shown = null, lastCamTime = 0, CAM_KEYS = ["yaw", "pitch", "dist", "tx", "ty", "tz"];
+  function updateCamera(w, h, time) {
+    var target = R.camera, dt = Math.max(0, Math.min(0.1, time - lastCamTime)), k = 1 - Math.exp(-dt * 14);
+    lastCamTime = time;
+    if (!shown) { shown = {}; CAM_KEYS.forEach(function (n) { shown[n] = target[n]; }); }
+    CAM_KEYS.forEach(function (n) { var gap = target[n] - shown[n]; shown[n] = Math.abs(gap) < 1e-4 * (n === "dist" ? target.dist : 1) ? target[n] : shown[n] + gap * k; });
+    var c = shown, cp = Math.cos(c.pitch), sp = Math.sin(c.pitch);
     var eye = [c.tx + Math.sin(c.yaw) * cp * c.dist, c.ty + sp * c.dist, c.tz + Math.cos(c.yaw) * cp * c.dist];
     var P = perspective(0.72, w / h, 0.5, 4000), V = lookAt(eye, [c.tx, c.ty, c.tz]);
     view.VP = mul(P, V); view.invVP = invert(view.VP); view.eye = eye;
@@ -286,6 +358,7 @@ var Render = (function () {
 
   // Screen point to world ray, for picking.
   R.ray = function (nx, ny) {
+    if (!view.invVP) return null;
     function un(z) {
       var m = view.invVP, x = nx * 2 - 1, y = 1 - ny * 2;
       var w = m[3] * x + m[7] * y + m[11] * z + m[15];
@@ -295,12 +368,21 @@ var Render = (function () {
     return { o: view.eye.slice(), d: norm([b[0] - a[0], b[1] - a[1], b[2] - a[2]]) };
   };
 
+  // World point to screen, as 0 to 1 across the canvas, for overlays drawn outside the raymarcher. Null behind the camera.
+  R.project = function (x, y, z) {
+    var m = view.VP;
+    if (!m) return null;
+    var cx = m[0] * x + m[4] * y + m[8] * z + m[12], cy = m[1] * x + m[5] * y + m[9] * z + m[13], cw = m[3] * x + m[7] * y + m[11] * z + m[15];
+    if (cw <= 0.01) return null;
+    return { x: (cx / cw + 1) / 2, y: (1 - cy / cw) / 2, w: cw };
+  };
+
   var PART_COL = [[0.45, 0.95, 1], [1, 0.75, 0.3], [0.4, 0.75, 1], [0.85, 1, 0.65], [1, 1, 1], [1, 0.72, 0.3]];
   var PART_SIZE = [1.2, 1.6, 0.9, 2.4, 1.3, 0.9];
 
   function drawParticles(w, h, real) {
-    var n = Sim.pCount;
-    if (!n) return;
+    var n = Sim.pCount, fx = typeof Effects !== "undefined" ? Effects.active : 0;
+    if (!n && !fx) return;
     var px = Sim.px, py = Sim.py, pz = Sim.pz, ty = Sim.ptype, pm = Sim.pmat, b = pointBuf, o = 0, so = 0, count = 0;
     if (real && !simBuf) simBuf = Sim.sharedBuffers();
     for (var p = 0; p < n; p++) {
@@ -321,6 +403,7 @@ var Render = (function () {
       b[o++] = px[p]; b[o++] = py[p]; b[o++] = pz[p]; b[o++] = PART_SIZE[t];
       b[o++] = c[0] * 2.5; b[o++] = c[1] * 2.5; b[o++] = c[2] * 2.5; b[o++] = 1;
     }
+    if (fx) { var added = Effects.fill(b, o); count += added; o += added * 8; }
     gl.useProgram(real ? realPointProg : pointProg);
     gl.uniformMatrix4fv(real ? RPU.uVP : PU.uVP, false, view.VP);
     gl.uniform1f(real ? RPU.uPx : PU.uPx, h * 1.35);
@@ -362,17 +445,21 @@ var Render = (function () {
     // Most of the chamber is air. A block with nothing near it needs no filtering.
     " if(texelFetch(uLum,q/8,0).a<.5){oF=vec4(0.);oT=vec4(0.);return;}",
     // A wide kernel estimates where the true surface lies along a long stair tread, not just at the step. The clamp below still ties it to the cells.
-    " float s=0.,sn=0.,l=0.,lw=0.,g=0.,fi=0.,soft=0.,churn=0.,sum=0.,nsum=0.;vec3 tint=vec3(0.);int cc=0,sm=0,lm=0,wm=0;bool deep=false;",
+    " float s=0.,sn=0.,l=0.,lw=0.,g=0.,fi=0.,soft=0.,churn=0.,sum=0.,nsum=0.,gh=0.,ghn=0.;vec3 tint=vec3(0.);int cc=0,sm=0,lm=0,wm=0;bool deep=false,gc=false;",
     " for(int dz=-2;dz<=2;dz++)for(int dy=-2;dy<=2;dy++)for(int dx=-2;dx<=2;dx++){",
     "  int r2=dx*dx+dy*dy+dz*dz;if(r2>6)continue;float w=WT[r2];sum+=w;if(r2<=1)nsum+=w;",
     "  ivec3 k=clamp(q+ivec3(dx,dy,dz),lo,hi);ivec4 m=ivec4(texelFetch(uMat,k,0)*255.+.5);int cl=m.g>>4;",
     "  if(r2==0)cc=cl;if(cl==4&&r2==4&&dz==-2&&q.z>=3)deep=true;if(cl==0)continue;",
     "  int face=r2==1?(1<<(dx!=0?(dx<0?0:1):dy!=0?(dy<0?2:3):(dz<0?4:5))):0;",
     "  if(cl<=3){s+=w;sm|=face;if(r2<=1)sn+=w;if(cl!=1)soft+=w;}",
+    // Glass with no alpha is a container wall drawn by a mesh. It is left out of the kernel altogether, as if it were not there: what
+    // touches it keeps its own density right up to it, so water stays level to the wall and the wall makes no surface of its own.
+    "  else if(cl==5&&m.a==0){gh+=w;if(r2<=1)ghn+=w;if(r2==0)gc=true;}",
     "  else if(cl<=5){l+=w;lm|=face;if(cl==4){lw+=w;wm|=face;churn+=w*float(m.b)/255.;}}",
     "  else{float a=float(m.a)/255.;g+=w*a;tint+=w*a*texelFetch(uColor,k,0).rgb;if(cl>=7)fi+=w;}",
     " }",
-    " bool cs=cc>=1&&cc<=3,cl2=cc==4||cc==5||(cs&&l>0.);",
+    " sum=max(sum-gh,.001);nsum=max(nsum-ghn,.001);",
+    " bool cs=cc>=1&&cc<=3,cl2=cc==4||(cc==5&&!gc)||(cs&&l>0.);",
     // Static solids lean on the narrow kernel so machined edges stay crisp. Powders and opaque liquids use the wide one and round off.
     " float softF=soft/max(s,.001),sb=mix(s/sum,sn/nsum,.5*(1.-softF));",
     // Solids count as liquid where they touch it, or a thin line of air would open between water and whatever it wets.
@@ -382,7 +469,9 @@ var Render = (function () {
     " bool bump=cc==4&&(la&16)!=0&&(la&32)==0&&int((la&1)!=0)+int((la&2)!=0)+int((la&4)!=0)+int((la&8)!=0)<=2;",
     // A pocket closed in by liquid opens out to nearly a full cell, or a one-cell bubble would be too small to see.
     " int faces=int((la&1)!=0)+int((la&2)!=0)+int((la&4)!=0)+int((la&8)!=0)+int((la&16)!=0)+int((la&32)!=0);bool pocket=!cl2&&!cs&&(lm&32)!=0&&faces>=5;",
-    " oF=vec4(keep(cs,sb,sm),l>0.?(pocket?min(lv,.12):(pit||bump?lv:keep(cl2,lv,la))):0.,g/sum,fi/sum);",
+    // A mesh-drawn wall cell is never inside, but beside liquid it sits just under the surface level, so the surface lies close to the
+    // wall cell and the liquid meets the mesh's glass instead of standing back from it.
+    " oF=vec4(keep(cs,sb,sm),l>0.?(gc?min(lv,.49):(pocket?min(lv,.12):(pit||bump?lv:keep(cl2,lv,la)))):0.,g/sum,fi/sum);",
     // Alpha holds foam where liquid dominates and softness where solid does. Foam comes from real agitation: moving or boiling cells, gas in the liquid, and a ragged surface.
     // It needs depth to form, so a thin film of spilt water stays clear.
     " float foam=lw>0.&&deep?clamp(churn/lw*.8+g/sum*3.+(pit||bump?.14:0.),0.,1.):0.;",
@@ -451,18 +540,32 @@ var Render = (function () {
   ].join("\n");
 
   // Debris particles are small lit spheres of their material here. Radiation keeps its glow.
-  var REAL_PFS = "#version 300 es\nprecision highp float;in vec4 vC;out vec4 f;void main(){vec2 d=gl_PointCoord-.5;float r=dot(d,d);if(r>.25)discard;if(vC.a<.5){vec3 n=vec3(d.x*2.,-d.y*2.,sqrt(max(1.-r*4.,0.)));f=vec4(vC.rgb*(.3+.8*max(dot(n,vec3(-.5,.8,.34)),0.)),1.);}else{float a=1.-r*4.;f=vec4(vC.rgb*a,a);}}";
+  var REAL_PFS = "#version 300 es\nprecision highp float;in vec4 vC;out vec4 f;void main(){vec2 d=gl_PointCoord-.5;float r=dot(d,d);if(r>.25)discard;float s=1.-r*4.;if(vC.a<.25){vec3 n=vec3(d.x*2.,-d.y*2.,sqrt(max(s,0.)));f=vec4(vC.rgb*(.3+.8*max(dot(n,vec3(-.5,.8,.34)),0.)),1.);}else if(vC.a<.5)f=vec4(vC.rgb*s*s,0.);else{float a=s*s*(vC.a-.5)*2.;f=vec4(vC.rgb*a,a);}}";
 
   var MARCH_FS = [
     "#version 300 es",
     "precision highp float;precision highp int;precision highp sampler3D;precision highp sampler2D;",
     "in vec2 vUv;out vec4 frag;",
-    "uniform sampler3D uColor,uMat,uField,uTint,uLight,uLum,uNoise,uEmitL;uniform sampler2D uLUT;",
+    "uniform sampler3D uColor,uMat,uField,uTint,uLight,uLum,uNoise,uEmitL;uniform sampler2D uLUT,uCont;",
     "uniform mat4 uInvVP,uVP;uniform vec3 uEye,uDim,uBrush;uniform float uBrushR,uTime,uBlock;uniform int uFrame,uFlat;uniform ivec3 uCDim;",
     // The sun comes from the side of the default view, so forms are modelled by light and shadows fall where they can be seen.
     "const vec3 SUN=normalize(vec3(-.62,.7,.34));const vec3 SUNC=vec3(3.5,3.2,2.8);const float ISO=.5;const float PI=3.14159265;",
     "vec3 tc(vec3 p){return (p/uDim).xzy;}",
-    "vec4 fld(vec3 p){return textureLod(uField,tc(p),0.);}",
+    // Liquid in a round container meets a wall that is round only in the mesh: in cells it is a stair. In the outer ring of the
+    // container the liquid's density is read just inside the column, at the same height, so its surface stays level up to the wall,
+    // and it is cut off at the true circle, so the side is a smooth cylinder and the rim seen from above a clean circle.
+    // inward(p, cut) gives the point the liquid at p is read from, and in cut how far p is inside the true wall (1 inside, 0 outside).
+    "vec3 inward(vec3 p,out float cut){cut=1.;vec4 c=texelFetch(uCont,clamp(ivec2(floor(p.xz)),ivec2(0),ivec2(uDim.xz)-1),0);",
+    " if(c.z>0.){float y0=floor(c.w/1024.),y1=c.w-y0*1024.;",
+    // Read from where every cell the filtered field blends (up to 1.42 cells away) and the cell itself are liquid, not wall: on a
+    // wide circle a point only half a cell in still lands on wall cells here and there, and that shows as faint vertical ribs.
+    "  if(p.y>y0+1.&&p.y<y1){vec2 dv=p.xz-c.xy;float rho=length(dv),rin=max(c.z-2.,.3);",
+    "   if(rho>rin){cut=clamp(.5+(c.z-rho)*1.5,0.,1.);vec2 q=c.xy+dv*(rin/rho);return vec3(q.x,p.y,q.y);}}}",
+    " return p;}",
+    "vec3 inward(vec3 p){float c;return inward(p,c);}",
+    "vec4 fld(vec3 p){vec4 f=textureLod(uField,tc(p),0.);float cut;vec3 q=inward(p,cut);",
+    " if(cut<1.||q!=p)f.g=min(textureLod(uField,tc(q),0.).g,cut);",
+    " return f;}",
     "vec4 lit(vec3 p){return textureLod(uLight,tc(p),0.);}",
     "vec3 lum(vec3 p){return textureLod(uLum,tc(p),0.).rgb;}",
     "vec3 nz(vec3 p){return textureLod(uNoise,p,0.).rgb-.5;}",
@@ -491,7 +594,7 @@ var Render = (function () {
     "void main(){",
     " vec2 ndc=vUv*2.-1.;vec4 nf=uInvVP*vec4(ndc,-1.,1.),ff=uInvVP*vec4(ndc,1.,1.);vec3 ro=uEye,rd=safe(normalize(ff.xyz/ff.w-nf.xyz/nf.w));",
     " vec3 lo=vec3(1.),hi=uDim-1.;float ign=fract(52.9829189*fract(dot(gl_FragCoord.xy+float(uFrame%64)*5.588238,vec2(.06711056,.00583715))));",
-    " vec2 tb=box(ro,rd,lo,hi);vec3 acc=vec3(0.),tr=vec3(1.),o=ro,d=rd,P=vec3(0.),N=vec3(0.,1.,0.);float firstT=-1.;bool hit=false,isFloor=false;",
+    " vec2 tb=box(ro,rd,lo,hi);vec3 acc=vec3(0.),tr=vec3(1.),o=ro,d=rd,P=vec3(0.),N=vec3(0.,1.,0.);float firstT=-1.;bool hit=false,isFloor=false;vec3 depthP=vec3(0.);bool hasD=false;",
     " bool rUsed=false;vec3 rO=vec3(0.),rD=vec3(0.,1.,0.),rW=vec3(0.);float rRough=0.;",
     " if(tb.x<tb.y&&tb.y>0.){",
     "  float t=max(tb.x,0.)+1e-3,tEnd=tb.y,prevT=t;bool inL=false,first=true;int bounces=0;",
@@ -509,19 +612,24 @@ var Render = (function () {
     // The normal blends two scales of the gradient: the fine one keeps edges, the broad one rides over what is left of the cell steps.
     "    vec3 ph=o+d*th;vec3 e=vec3(1.05,0.,0.),e2=vec3(2.3,0.,0.);vec3 g=vec3(dot(fld(ph+e.xyy)-fld(ph-e.xyy),m),dot(fld(ph+e.yxy)-fld(ph-e.yxy),m),dot(fld(ph+e.yyx)-fld(ph-e.yyx),m));",
     // Glass keeps only the fine scale, so a flat pane stays flat where water meets it.
-    "    bool pane=ev!=1&&(matAt(ivec3(floor(ph+(ev==2?d:-d)*.7))).g>>4)==5;",
+    "    bool pane=ev!=1&&(matAt(ivec3(floor(inward(ph+(ev==2?d:-d)*.7)))).g>>4)==5;",
     "    float wB=ev==1?mix(.25,.9,textureLod(uTint,tc(ph),0.).a):1.1;if(!pane)g+=wB*vec3(dot(fld(ph+e2.xyy)-fld(ph-e2.xyy),m),dot(fld(ph+e2.yxy)-fld(ph-e2.yxy),m),dot(fld(ph+e2.yyx)-fld(ph-e2.yyx),m));",
     // Liquids get a third, broader scale: they should be the smoothest surfaces in the scene.
     "    if(ev!=1&&!pane){vec3 e3=vec3(3.9,0.,0.);g+=.8*vec3(dot(fld(ph+e3.xyy)-fld(ph-e3.xyy),m),dot(fld(ph+e3.yxy)-fld(ph-e3.yxy),m),dot(fld(ph+e3.yyx)-fld(ph-e3.yyx),m));}",
     "    vec3 gn=dot(g,g)>1e-8?normalize(g):-d;if(first&&ev!=3)gn=-boxN;",
     "    if(firstT<0.&&ev!=3)firstT=th;",
+    // Depth is where meshes are hidden. Glass with no alpha is a container wall a mesh draws instead, so it must not hide that mesh:
+    // depth comes from the first thing past it. (firstT, which the temporal resolve reprojects with, still starts at it.)
+    "    if(ev!=3&&!hasD){bool gg=false;if(ev==2){ivec4 mg=matAt(ivec3(floor(inward(ph+d*.7))));gg=(mg.g>>4)==5&&mg.a==0;}if(!gg){hasD=true;depthP=ph;}}",
     "    if(ev==1){hit=true;P=ph;N=-gn;if(dot(N,d)>0.)N=normalize(N-d*dot(N,d)*1.05);break;}",
     "    if(++bounces>16)break;",
     "    if(ev==2){",
     // Into a liquid: Fresnel reflection, a sharp sun glint, then the ray bends and carries on underneath. Glass walls are thin, so they reflect but do not bend.
-    "     ivec4 mm=matAt(ivec3(floor(ph+d*.7)));int cl=mm.g>>4;int id=mm.r|((mm.g&15)<<8);float n=(cl==4||cl==5)?1.+texelFetch(uLUT,ivec2(id&63,id>>6),0).b*1.5:1.333;",
+    "     ivec4 mm=matAt(ivec3(floor(inward(ph+d*.7))));int cl=mm.g>>4;int id=mm.r|((mm.g&15)<<8);float n=(cl==4||cl==5)?1.+texelFetch(uLUT,ivec2(id&63,id>>6),0).b*1.5:1.333;",
     "     vec3 Nf=-gn;if(cl==4&&!first){Nf=normalize(Nf+(nz(ph*.018+vec3(uTime*.012,0.,uTime*.009))+nz(ph*.045-vec3(uTime*.02,0.,uTime*.016))*.5)*.09);}if(dot(Nf,d)>0.)Nf=-gn;",
     "     float nv=max(dot(Nf,-d),0.);float F0=(n-1.)/(n+1.);F0*=F0;float F=F0+(1.-F0)*pow(1.-nv,5.);if(cl==5)F=min(F,.45);",
+    // Glass with no alpha is a container wall that a mesh draws instead. It still shapes the liquid against it, but shows nothing itself.
+    "     if(cl==5&&mm.a==0){F=0.;F0=0.;}",
     "     vec3 F3=vec3(F0);float D=ggx(Nf,-d,SUN,.09,F3);vec4 l=lit(ph+Nf*1.5);acc+=tr*F3*D*SUNC*max(dot(Nf,SUN),0.)*l.rgb;",
     // Foam: a lacy web of bubbles drifting on the water, thin where agitation is slight. It is lit as a rough diffuse film, not painted on opaque.
     "     if(cl==4){float fa=textureLod(uTint,tc(ph),0.).a;if(fa>.03){float n3=textureLod(uNoise,ph*.022+vec3(uTime*.006,0.,uTime*.004),0.).r,n4=textureLod(uNoise,ph*.075-vec3(uTime*.01,0.,uTime*.006),0.).g;float lace=1.-abs(n3*2.-1.);float c=smoothstep(.95-fa*.75,1.4-fa*.75,lace*.8+n4*.6)*min(fa*2.2,.78);acc+=tr*c*(SUNC*max(Nf.y*.7+.3,0.)*l.rgb/PI*.8+l.a*vec3(.36,.4,.46)+.05);tr*=1.-c;}}",
@@ -530,7 +638,7 @@ var Render = (function () {
     "     vec3 nd=cl==5?d:refract(d,Nf,1./n);if(dot(nd,nd)>.1)d=safe(nd);o=ph;t=.02;prevT=t;tEnd=box(o,d,lo,hi).y;inL=true;first=false;continue;",
     "    }",
     // Out of a liquid: bend back, or reflect internally at a shallow angle, as the underside of a water surface does.
-    "    ivec4 mm=matAt(ivec3(floor(ph-d*.7)));int cl=mm.g>>4;int id=mm.r|((mm.g&15)<<8);float n=cl==5?1.:((cl==4)?1.+texelFetch(uLUT,ivec2(id&63,id>>6),0).b*1.5:1.333);",
+    "    ivec4 mm=matAt(ivec3(floor(inward(ph-d*.7))));int cl=mm.g>>4;int id=mm.r|((mm.g&15)<<8);float n=cl==5?1.:((cl==4)?1.+texelFetch(uLUT,ivec2(id&63,id>>6),0).b*1.5:1.333);",
     // The inside of a bubble wall mirrors the surroundings, brightest at its rim. That rim is what makes a bubble readable.
     "    vec3 nd=refract(d,gn,n);if(dot(nd,nd)<.1){acc+=tr*.5*env(reflect(d,gn),.08);tr*=.5;d=safe(reflect(d,gn));}else{float F0x=(n-1.)/(n+1.);F0x*=F0x;float Fx=F0x+(1.-F0x)*pow(1.-max(dot(gn,-d),0.),5.);acc+=tr*(Fx*env(reflect(d,gn),.08)+pow(max(dot(reflect(d,gn),SUN),0.),48.)*SUNC*lit(ph+vec3(0.,1.5,0.)).rgb*.35);tr*=1.-Fx;d=safe(nd);inL=false;}o=ph;t=.02;prevT=t;tEnd=box(o,d,lo,hi).y;continue;",
     "   }",
@@ -538,7 +646,7 @@ var Render = (function () {
     "   if(inL){",
     // Inside a liquid each colour is absorbed at its own rate, cell by cell. Deep water turns blue and shallow water stays clear.
     // The lowest alpha bit marks a true liquid. Glass only tints what passes through it.
-    "    vec4 c=texelFetch(uColor,ivec3(floor(p)).xzy,0);if(c.a>.004&&c.a<.98){bool wet=(int(c.a*255.+.5)&1)==1;vec3 tn=exp(-((1.03-c.rgb)*c.a*(wet?2.6:.8)+c.a*(wet?.12:.03))*ds);if(wet){vec4 l=lit(p);acc+=tr*(1.-tn)*c.rgb*(l.rgb*SUNC*.09+l.a*vec3(.2,.24,.3)+.03+lum(p)*.8)*.5;}tr*=tn;vec3 e2=textureLod(uEmitL,tc(p),0.).rgb;acc+=tr*e2*e2*1.1*ds;}",
+    "    vec4 c=texelFetch(uColor,ivec3(floor(inward(p))).xzy,0);if(c.a>.004&&c.a<.98){bool wet=(int(c.a*255.+.5)&1)==1;vec3 tn=exp(-((1.03-c.rgb)*c.a*(wet?2.6:.8)+c.a*(wet?.12:.03))*ds);if(wet){vec4 l=lit(p);acc+=tr*(1.-tn)*c.rgb*(l.rgb*SUNC*.09+l.a*vec3(.2,.24,.3)+.03+lum(p)*.8)*.5;}tr*=tn;vec3 e2=textureLod(uEmitL,tc(p),0.).rgb;acc+=tr*e2*e2*1.1*ds;}",
     "   }else{",
     "    if(cs.r+cs.g+cs.b>.002){acc+=tr*lum(p)*ds*.005;",
     // Sim flames die within a few cells. Reading the flame field lower down carries each tongue a little higher as it thins, inside the block that glows anyway.
@@ -573,7 +681,7 @@ var Render = (function () {
     "  }",
     " }",
     // Floor: a dark satin plate, shaded through the same path as every other surface. Its grid is faint but still gives a sense of scale.
-    " if(!hit&&d.y<0.&&max(tr.r,max(tr.g,tr.b))>.01){float tf=(1.-o.y)/d.y;if(tf>0.){vec3 h=o+d*tf;if(h.x>=1.&&h.z>=1.&&h.x<=hi.x&&h.z<=hi.z){hit=true;isFloor=true;P=h;N=vec3(0.,1.,0.);if(firstT<0.)firstT=tf;}}}",
+    " if(!hit&&d.y<0.&&max(tr.r,max(tr.g,tr.b))>.01){float tf=(1.-o.y)/d.y;if(tf>0.){vec3 h=o+d*tf;if(h.x>=1.&&h.z>=1.&&h.x<=hi.x&&h.z<=hi.z){hit=true;isFloor=true;P=h;N=vec3(0.,1.,0.);if(firstT<0.)firstT=tf;if(!hasD){hasD=true;depthP=h;}}}}",
     " if(hit){",
     "  vec3 alb=vec3(.3),V=-d;float metal=0.,rough=.6,n=1.5,det=0.;int cl=1;",
     "  if(isFloor){vec2 g=abs(fract(P.xz/16.)-.5);float dd=min(g.x,g.y)*16.;float w=.03+length(P-ro)*.0014;alb=mix(vec3(.05,.053,.06),vec3(.1,.105,.118),(1.-smoothstep(0.,w+.03,dd))*.5);rough=.5;n=1.4;}",
@@ -612,13 +720,15 @@ var Render = (function () {
     " }",
     " if(rUsed)acc+=rW*reflTrace(rO,rD,rRough,ign);",
     " vec3 outline=vec3(0.);{vec2 tt=box(ro,rd,lo,hi);if(tt.x<tt.y&&tt.y>0.){for(int k=0;k<2;k++){float tk=k==0?tt.x:tt.y;if(tk<0.)continue;vec3 q=ro+rd*tk;vec3 dd=min(abs(q-lo),abs(q-hi));float m=dd.x+dd.y+dd.z-max(max(dd.x,dd.y),dd.z);float w=tk*.0016;outline+=vec3(.24,.28,.36)*(1.-smoothstep(0.,w+.05,m))*(k==0?1.:.55);}}}",
-    " vec3 c3=acc+tr*bg(d)+outline*max(tr.r,max(tr.g,tr.b));",
+    " vec4 rm=uRoom==1?room(o,d,SUN):vec4(bg(d),-1.);if(firstT<0.&&rm.w>0.)firstT=rm.w;if(!hasD&&rm.w>0.){hasD=true;depthP=o+d*rm.w;}",
+    " vec3 c3=acc+tr*rm.rgb+outline*max(tr.r,max(tr.g,tr.b));",
     " if(uBrushR>0.){vec3 oc=ro-uBrush;float b=dot(oc,rd),cc=dot(oc,oc)-uBrushR*uBrushR,h=b*b-cc;if(h>0.){float q=sqrt(h);float s=-b-q;if(s>0.){float rim=pow(1.-clamp(q/uBrushR,0.,1.),2.);c3+=vec3(.34,.42,.55)*(.03+rim*.32);}}}",
     " if(any(isnan(c3))||any(isinf(c3)))c3=vec3(0.);",
     " frag=vec4(c3,firstT<0.?3000.:firstT);",
-    " if(firstT>=0.){vec4 cp=uVP*vec4(ro+rd*firstT,1.);gl_FragDepth=clamp(cp.z/cp.w*.5+.5,0.,1.);}else gl_FragDepth=1.;",
+    " if(hasD){vec4 cp=uVP*vec4(depthP,1.);gl_FragDepth=clamp(cp.z/cp.w*.5+.5,0.,1.);}else gl_FragDepth=1.;",
     "}"
   ].join("\n");
+  MARCH_FS = MARCH_FS.replace(SAFE_FN, SAFE_FN + "\n" + ROOM_GLSL);
 
   var realProg = null, realReady = false, realFailed = false, realCompileExt = null, realShaders = null, RU = {}, fieldProg, lightProg, sliceProg, sliceT, lumProg, taaProg, realPointProg, streakProg, streakVao, streakVbo, streakBuf, simBuf, SKU = {}, FU = {}, LU = {}, MU = {}, TU = {}, RPU = {};
   var texMat = null, texField, texTint, texLight, texLum, texLUT, texNoise, lightScratch = [], lightFBO = [], lightWait = 0, fieldFBO = [], lumFBO = null, settle = null, rowRect = null, emitSampler, lumDirty = true, snapField = true, lastFrameTime = 0, simClock = 0, lastTick = -1;
@@ -670,11 +780,13 @@ var Render = (function () {
       var b = document.getElementById("lookBtn"); if (b) { b.disabled = true; b.setAttribute("aria-pressed", "false"); b.title = "The realistic look could not start on this graphics driver."; }
       return;
     }
-    uniforms(realProg, MU, ["uColor", "uMat", "uField", "uTint", "uLight", "uLum", "uNoise", "uEmitL", "uLUT", "uInvVP", "uVP", "uEye", "uDim", "uBrush", "uBrushR", "uTime", "uBlock", "uFrame", "uFlat", "uCDim"]);
+    uniforms(realProg, MU, ["uColor", "uMat", "uField", "uTint", "uLight", "uLum", "uNoise", "uEmitL", "uLUT", "uCont","uInvVP", "uVP", "uEye", "uDim", "uBrush", "uBrushR", "uTime", "uBlock", "uFrame", "uFlat", "uCDim", "uRoom"]);
     realReady = true;
     if (R.look === "realistic") R.markAllDirty();
   }
   function realActive() { return realReady && R.look === "realistic"; }
+  // Whether the realistic look has finished compiling, or will never come because this driver cannot run it.
+  R.realisticReady = function () { return realReady || realFailed || !realProg; };
 
   function addLookToggle() {
     var anchor = document.getElementById("phView");
@@ -693,11 +805,43 @@ var Render = (function () {
   R.setLook = function (v) {
     if (realFailed || !realProg) return;
     R.look = v;
+    quietSince = -1;
     try { localStorage.setItem("elemental.look", v); } catch (e) { /* the choice just will not persist */ }
     var b = document.getElementById("lookBtn"); if (b) b.setAttribute("aria-pressed", v === "realistic" ? "true" : "false");
     histValid = false; snapField = true;
     R.markAllDirty();
   };
+
+  // Round containers whose walls a mesh draws, so liquid inside can be shaped to the true circle instead of the cells' stair steps.
+  // Each is { x, z, r, y0, y1 }: axis, the radius the liquid meets, and the cell layers from the floor to the rim. A 2D texture over the
+  // chamber's columns says which container, if any, each column belongs to, so the shader finds it with one fetch.
+  var texCont = null, contData = null, contList = [], contDirty = true;
+  R.setContainers = function (list) { contList = list || []; contDirty = true; R.wake(); };
+  function uploadContainers() {
+    if (texCont && !contDirty && contData && contData.length === W * D * 4) return;
+    contDirty = false;
+    if (!contData || contData.length !== W * D * 4) contData = new Float32Array(W * D * 4);
+    contData.fill(0);
+    var best = new Float32Array(W * D).fill(1e9);
+    contList.forEach(function (c) {
+      var reach = c.r + 2.5, x0 = Math.max(0, Math.floor(c.x - reach)), x1 = Math.min(W - 1, Math.ceil(c.x + reach)), z0 = Math.max(0, Math.floor(c.z - reach)), z1 = Math.min(D - 1, Math.ceil(c.z + reach));
+      for (var z = z0; z <= z1; z++) for (var x = x0; x <= x1; x++) {
+        var d = Math.hypot(x + 0.5 - c.x, z + 0.5 - c.z), k = z * W + x;
+        if (d > reach || d >= best[k]) continue;   // where two footprints meet, the nearer container owns the column
+        best[k] = d;
+        contData[k * 4] = c.x; contData[k * 4 + 1] = c.z; contData[k * 4 + 2] = c.r; contData[k * 4 + 3] = c.y0 * 1024 + c.y1;
+      }
+    });
+    if (!texCont) {
+      texCont = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, texCont);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, texCont);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, W, D, 0, gl.RGBA, gl.FLOAT, contData);
+  }
 
   function freeVolumes() {
     if (!texMat) return;
@@ -887,14 +1031,17 @@ var Render = (function () {
     });
     gl.bindSampler(13, emitSampler);
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, texLUT); gl.uniform1i(MU.uLUT, 10);
+    uploadContainers(); gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, texCont); gl.uniform1i(MU.uCont, 12);
     gl.uniformMatrix4fv(MU.uInvVP, false, jInv); gl.uniformMatrix4fv(MU.uVP, false, view.VP);
     gl.uniform3f(MU.uEye, view.eye[0], view.eye[1], view.eye[2]);
     gl.uniform3f(MU.uDim, W, H, D); gl.uniform3i(MU.uCDim, cW, cH, cD);
-    gl.uniform1f(MU.uTime, simClock); gl.uniform1f(MU.uBlock, BLOCK); gl.uniform1i(MU.uFrame, frameN); gl.uniform1i(MU.uFlat, R.viewMode === "normal" ? 0 : 1);
+    gl.uniform1f(MU.uTime, simClock); gl.uniform1f(MU.uBlock, BLOCK); gl.uniform1i(MU.uFrame, frameN); gl.uniform1i(MU.uFlat, R.viewMode === "normal" ? 0 : 1); gl.uniform1i(MU.uRoom, R.room ? 1 : 0);
     if (R.brush) { gl.uniform3f(MU.uBrush, R.brush.x, R.brush.y, R.brush.z); gl.uniform1f(MU.uBrushR, R.brush.r); } else gl.uniform1f(MU.uBrushR, 0);
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.ALWAYS);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.depthFunc(gl.LESS);
+    // Meshes such as lab equipment go in before the resolve, with the same jitter, so their edges are smoothed like the volume's.
+    if (R.meshPass) { R.meshPass(gl, jVP, view.eye, { ldr: false }); gl.bindVertexArray(vao); }
     gl.disable(gl.DEPTH_TEST);
 
     var cur = hist[histI], next = hist[1 - histI];
@@ -919,16 +1066,27 @@ var Render = (function () {
     postProcess();
   }
 
-  R.markAllDirty = function () { Sim.DIRTY.fill(1); };
+  R.markAllDirty = function () { Sim.DIRTY.fill(1); quietSince = -1; };
+  // Draw again even though nothing in the chamber changed, for things the renderer cannot see, like a setting.
+  R.wake = function () { quietSince = -1; };
 
+  // Nothing to redraw: no cell changed, the view is still, nothing is flying about. After a short wait the last picture just stays on screen,
+  // which saves the GPU and the battery while paused or watching a settled chamber. The wait lets shadows settle and the image sharpen first.
+  var QUIET_SECONDS = 2.5, quietSince = -1, lastKey = "";
+  function anyDirty() { var d = Sim.DIRTY; for (var q = 0; q < d.length; q++) if (d[q]) return true; return false; }
   R.frame = function (time) {
     if (!ok) return;
     var dpr = Math.min(window.devicePixelRatio || 1, 2) * R.scale;
     var cssW = canvas.clientWidth, cssH = canvas.clientHeight;
     var w = Math.max(2, (cssW * dpr) | 0), h = Math.max(2, (cssH * dpr) | 0);
     if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-    updateCamera(w, h);
-    pollRealistic();
+    updateCamera(w, h, time);
+    pollRealistic();   // before the idle check, or a quiet chamber would never notice the realistic shader finishing its compile
+    var b = R.brush, key = CAM_KEYS.map(function (n) { return shown[n].toFixed(4); }).join() + "|" + w + "x" + h + "|" + R.look + R.viewMode + R.room + "|" + (b ? b.x + "," + b.y + "," + b.z + "," + b.r : "");
+    if (key !== lastKey || Sim.pCount > 0 || (typeof Effects !== "undefined" && Effects.active > 0) || anyDirty() || quietSince < 0) quietSince = time;
+    lastKey = key;
+    R.drawing = time - quietSince < QUIET_SECONDS;
+    if (!R.drawing) return;
     if (realActive()) {
       ensureVolumes();
       var uploaded = uploadDirty(time);
@@ -948,11 +1106,12 @@ var Render = (function () {
     gl.uniformMatrix4fv(U.uInvVP, false, view.invVP); gl.uniformMatrix4fv(U.uVP, false, view.VP);
     gl.uniform3f(U.uEye, view.eye[0], view.eye[1], view.eye[2]);
     gl.uniform3f(U.uDim, W, H, D);
-    gl.uniform1f(U.uTime, time); gl.uniform1f(U.uBlock, BLOCK); gl.uniform1i(U.uDirect, hdr ? 0 : 1);
+    gl.uniform1f(U.uTime, time); gl.uniform1f(U.uBlock, BLOCK); gl.uniform1i(U.uDirect, hdr ? 0 : 1); gl.uniform1i(U.uRoom, R.room ? 1 : 0);
     if (R.brush) { gl.uniform3f(U.uBrush, R.brush.x, R.brush.y, R.brush.z); gl.uniform1f(U.uBrushR, R.brush.r); } else gl.uniform1f(U.uBrushR, 0);
     gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.ALWAYS);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.depthFunc(gl.LESS);
+    if (R.meshPass) R.meshPass(gl, view.VP, view.eye, { ldr: !hdr });
     drawParticles(w, h);
     gl.bindVertexArray(null);
     if (hdr) postProcess();
